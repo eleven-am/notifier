@@ -140,10 +140,12 @@ export function selector<ReturnedState> (selectorFn: SelectorHandler<ReturnedSta
         subscribe: subject.subscribe.bind(subject),
         getServerSnapshot: () => {
             ensureInitialised();
+
             return serverState;
         },
         getSnapshot: () => {
             ensureInitialised();
+
             return returnedState;
         },
         createStateHook: (): UseNotifierHook<ReturnedState> => <ReturnType>(selectorFunc?: SelectorFunc<ReturnedState, ReturnType>): ReturnType => {
