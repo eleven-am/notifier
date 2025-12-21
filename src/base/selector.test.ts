@@ -278,6 +278,18 @@ describe('selector', () => {
             counter.increment();
             expect(subscriber).toHaveBeenCalledTimes(1);
         });
+
+        it('should reinitialize snapshots after destroy on next access', () => {
+            const counter = new CounterNotifier({ count: 1 });
+            const derived = selector((get) => get(counter).count * 2);
+
+            expect(derived.getSnapshot()).toBe(2);
+
+            derived.destroy();
+            counter.setCount(3);
+
+            expect(derived.getSnapshot()).toBe(6);
+        });
     });
 
     describe('getServerSnapshot', () => {

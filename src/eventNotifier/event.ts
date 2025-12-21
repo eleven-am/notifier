@@ -9,7 +9,7 @@ export type UseEventHook<EventType> = <Event extends keyof EventType>(
     callback: (data: EventType[Event]) => void
 ) => void;
 
-export class EventNotifier<State, EventType extends Record<string, any>> extends BaseNotifier<State> {
+export class EventNotifier<State extends object, EventType extends Record<string, any>> extends BaseNotifier<State> {
     readonly #subject: EventSubject<EventType>;
 
     constructor (initialState: State) {

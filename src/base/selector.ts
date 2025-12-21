@@ -1,4 +1,4 @@
-import { useSyncExternalStore } from 'react';
+import { useSyncExternalStore, useRef } from 'react';
 
 import { BaseNotifier } from './base';
 import { Subject, Unsubscribe } from '../subjects/subject';
@@ -7,11 +7,11 @@ import { deepCompare } from '../utils/deepCompare';
 type SelectorHook<State> = ReturnType<typeof selector<State>>;
 type SelectorFunc<State, ReturnType> = (state: State) => ReturnType;
 type UseNotifierHook<State> = <ReturnType = State>(selector?: SelectorFunc<State, ReturnType>) => ReturnType;
-type GetFunction = <NotifierState>(notifier: BaseNotifier<NotifierState> | SelectorHook<NotifierState>) => Readonly<NotifierState>;
-type SetFunction = <NotifierState>(notifier: BaseNotifier<NotifierState>, state: NotifierState) => void;
+type GetFunction = <NotifierState>(notifier: BaseNotifier<NotifierState & object> | SelectorHook<NotifierState>) => Readonly<NotifierState>;
+type SetFunction = <NotifierState extends object>(notifier: BaseNotifier<NotifierState>, state: NotifierState) => void;
 type SelectorHandler<ReturnedState> = (get: GetFunction, set: SetFunction) => Promise<ReturnedState> | ReturnedState;
 
-function getNotifierState<T> (notifier: BaseNotifier<T> | SelectorHook<T>): T {
+function getNotifierState<T> (notifier: BaseNotifier<T & object> | SelectorHook<T>): T {
     if (notifier instanceof BaseNotifier) {
         return (notifier as unknown as { state: T }).state;
     }
@@ -19,7 +19,7 @@ function getNotifierState<T> (notifier: BaseNotifier<T> | SelectorHook<T>): T {
     return notifier.getSnapshot();
 }
 
-function getNotifierServerState<T> (notifier: BaseNotifier<T> | SelectorHook<T>): T {
+function getNotifierServerState<T> (notifier: BaseNotifier<T & object> | SelectorHook<T>): T {
     if (notifier instanceof BaseNotifier) {
         return (notifier as unknown as { serverState: T }).serverState;
     }
@@ -27,12 +27,12 @@ function getNotifierServerState<T> (notifier: BaseNotifier<T> | SelectorHook<T>)
     return notifier.getServerSnapshot();
 }
 
-function setNotifierState<T> (notifier: BaseNotifier<T>, state: T): void {
+function setNotifierState<T extends object> (notifier: BaseNotifier<T>, state: T): void {
     (notifier as unknown as { state: T }).state = state;
 }
 
 export function selector<ReturnedState> (selectorFn: SelectorHandler<ReturnedState>) {
-    const notifiers = new Set<BaseNotifier<unknown> | SelectorHook<unknown>>();
+    const notifiers = new Set<BaseNotifier<any> | SelectorHook<any>>();
     const unsubscribes: Unsubscribe[] = [];
     const subject = new Subject<ReturnedState>();
 
@@ -42,7 +42,7 @@ export function selector<ReturnedState> (selectorFn: SelectorHandler<ReturnedSta
     let returnedState: ReturnedState;
     let serverState: ReturnedState;
 
-    function set<NotifierState> (notifier: BaseNotifier<NotifierState>, state: NotifierState): void {
+    function set<NotifierState extends object> (notifier: BaseNotifier<NotifierState>, state: NotifierState): void {
         setNotifierState(notifier, state);
     }
 
@@ -87,13 +87,13 @@ export function selector<ReturnedState> (selectorFn: SelectorHandler<ReturnedSta
         unsubscribes.push(unsubscribe);
     }
 
-    function get<NotifierState> (notifier: BaseNotifier<NotifierState> | SelectorHook<NotifierState>): Readonly<NotifierState> {
+    function get<NotifierState> (notifier: BaseNotifier<NotifierState & object> | SelectorHook<NotifierState>): Readonly<NotifierState> {
         subscribeToNotifier(notifier);
 
         return getNotifierState(notifier);
     }
 
-    function getServer<NotifierState> (notifier: BaseNotifier<NotifierState> | SelectorHook<NotifierState>): Readonly<NotifierState> {
+    function getServer<NotifierState> (notifier: BaseNotifier<NotifierState & object> | SelectorHook<NotifierState>): Readonly<NotifierState> {
         subscribeToNotifier(notifier);
 
         return getNotifierServerState(notifier);
@@ -138,31 +138,51 @@ export function selector<ReturnedState> (selectorFn: SelectorHandler<ReturnedSta
 
     return {
         subscribe: subject.subscribe.bind(subject),
-        getServerSnapshot: () => serverState,
-        getSnapshot: () => returnedState,
+        getServerSnapshot: () => {
+            ensureInitialised();
+            return serverState;
+        },
+        getSnapshot: () => {
+            ensureInitialised();
+            return returnedState;
+        },
         createStateHook: (): UseNotifierHook<ReturnedState> => <ReturnType>(selectorFunc?: SelectorFunc<ReturnedState, ReturnType>): ReturnType => {
-            let clientState = selectorFunc
-                ? selectorFunc(returnedState)
-                : returnedState as unknown as ReturnType;
+            const selectorFuncRef = useRef(selectorFunc);
+            const clientStateRef = useRef(
+                selectorFunc
+                    ? selectorFunc(returnedState)
+                    : returnedState as unknown as ReturnType,
+            );
+            const serverStateRef = useRef(
+                selectorFunc
+                    ? selectorFunc(serverState)
+                    : serverState as unknown as ReturnType,
+            );
 
-            const currentServerState = selectorFunc
-                ? selectorFunc(serverState)
-                : serverState as unknown as ReturnType;
+            if (selectorFuncRef.current !== selectorFunc) {
+                selectorFuncRef.current = selectorFunc;
+                clientStateRef.current = selectorFunc
+                    ? selectorFunc(returnedState)
+                    : returnedState as unknown as ReturnType;
+                serverStateRef.current = selectorFunc
+                    ? selectorFunc(serverState)
+                    : serverState as unknown as ReturnType;
+            }
 
             const subscribe = (callback: () => void) => {
                 ensureInitialised();
                 subscriberCount += 1;
 
                 const unsubscribe = subject.subscribe((state) => {
-                    const newState = selectorFunc
-                        ? selectorFunc(state)
+                    const newState = selectorFuncRef.current
+                        ? selectorFuncRef.current(state)
                         : state as unknown as ReturnType;
 
-                    if (deepCompare(clientState, newState)) {
+                    if (deepCompare(clientStateRef.current, newState)) {
                         return;
                     }
 
-                    clientState = newState;
+                    clientStateRef.current = newState;
                     callback();
                 });
 
@@ -175,8 +195,8 @@ export function selector<ReturnedState> (selectorFn: SelectorHandler<ReturnedSta
                 };
             };
 
-            const getSnapshot = () => clientState;
-            const getServerSnapshot = () => currentServerState;
+            const getSnapshot = () => clientStateRef.current;
+            const getServerSnapshot = () => serverStateRef.current;
 
             return useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
         },

@@ -1,4 +1,4 @@
-import { useEffect, useSyncExternalStore, useRef, useCallback } from 'react';
+import { useSyncExternalStore, useRef, useCallback } from 'react';
 
 import { Subject, Unsubscribe, Subscriber } from '../subjects/subject';
 import { deepCompare } from '../utils/deepCompare';
@@ -27,7 +27,7 @@ type UseFactoryHook<Sub extends Subclass> =
 
 const defaultSelector: SelectorFunc<any, any> = (state) => state;
 
-export class BaseNotifier<Data> {
+export class BaseNotifier<Data extends object> {
     readonly #subject: Subject<Data>;
 
     readonly #initialState: Data;
@@ -72,6 +72,12 @@ export class BaseNotifier<Data> {
         this.#subject.publish(state);
     }
 
+    /**
+     * Creates a React hook that provides a component-scoped notifier instance.
+     * The instance is created once per component mount and persists across re-renders.
+     * Note: params are captured at hook creation time and changes to params will not
+     * recreate the instance. For dynamic params, use `build()` with your own state management.
+     */
     static createFactoryHook <SubClass extends Subclass> (this: SubClass, ...params: ConstructorParams<SubClass>): UseFactoryHook<SubClass> {
         return <ReturnType>(selector?: SelectorFunc<SubClassData<SubClass>, ReturnType>) => {
             const instanceRef = useRef<InstanceOf<SubClass> | null>(null);
@@ -100,8 +106,15 @@ export class BaseNotifier<Data> {
         return <ReturnType>(selector: SelectorFunc<Data, ReturnType> = defaultSelector) => {
             const selectorRef = useRef(selector);
             const clientStateRef = useRef(selectorRef.current(this.state));
-            const getSnapshot = useCallback(() => clientStateRef.current, []);
             const serverStateRef = useRef(selectorRef.current(this.serverState));
+
+            if (selectorRef.current !== selector) {
+                selectorRef.current = selector;
+                clientStateRef.current = selector(this.state);
+                serverStateRef.current = selector(this.serverState);
+            }
+
+            const getSnapshot = useCallback(() => clientStateRef.current, []);
             const getServerSnapshot = useCallback(() => serverStateRef.current, []);
 
             const subscribe = useCallback((callback: () => void) => this.#subject.subscribe((state) => {
@@ -114,10 +127,6 @@ export class BaseNotifier<Data> {
                 clientStateRef.current = newState;
                 callback();
             }), []);
-
-            useEffect(() => {
-                selectorRef.current = selector;
-            }, [selector]);
 
             return useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
         };
