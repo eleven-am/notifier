@@ -1,9 +1,13 @@
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 
 import { BaseNotifier } from '../base/base';
-import type { UseEventHook } from '../dist/types';
 import { EventSubject } from '../subjects/eventSubject';
 import { Unsubscribe } from '../subjects/subject';
+
+export type UseEventHook<EventType> = <Event extends keyof EventType>(
+    event: Event,
+    callback: (data: EventType[Event]) => void
+) => void;
 
 export class EventNotifier<State, EventType extends Record<string, any>> extends BaseNotifier<State> {
     readonly #subject: EventSubject<EventType>;
@@ -19,13 +23,19 @@ export class EventNotifier<State, EventType extends Record<string, any>> extends
 
     public createEventsHook (): UseEventHook<EventType> {
         return (event, callback) => {
+            const callbackRef = useRef(callback);
+
+            callbackRef.current = callback;
+
             useEffect(() => {
-                const unsubscribe = this.#subject.subscribe(event, callback);
+                const unsubscribe = this.#subject.subscribe(event, (data) => {
+                    callbackRef.current(data);
+                });
 
                 return () => {
                     unsubscribe();
                 };
-            }, [event, callback]);
+            }, [event]);
         };
     }
 

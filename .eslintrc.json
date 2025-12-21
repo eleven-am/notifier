@@ -15,7 +15,7 @@
     "sourceType": "module",
     "project": "./tsconfig.json"
   },
-  "ignorePatterns": [],
+  "ignorePatterns": ["**/*.test.ts", "dist/**"],
   "plugins": [
     "@typescript-eslint",
     "file-progress"

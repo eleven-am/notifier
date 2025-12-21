@@ -1,4 +1,4 @@
-import { useState, useEffect, useSyncExternalStore, useRef, useCallback } from 'react';
+import { useEffect, useSyncExternalStore, useRef, useCallback } from 'react';
 
 import { Subject, Unsubscribe, Subscriber } from '../subjects/subject';
 import { deepCompare } from '../utils/deepCompare';
@@ -13,7 +13,7 @@ type UseActorsHook<Class extends BaseNotifier<any>> = () => PublicMethods<Class>
 
 type SelectorFunc<State, ReturnType> = (state: State) => ReturnType;
 
-export type UseNotifierHook<Data> =<ReturnType = Data>(selector?: SelectorFunc<Data, ReturnType>) => ReturnType;
+export type UseNotifierHook<Data> = <ReturnType = Data>(selector?: SelectorFunc<Data, ReturnType>) => ReturnType;
 
 type InstanceOf<T> = T extends { prototype: infer R } ? R : never;
 type IgnoreConstructor<T> = Pick<T, keyof T>;
@@ -23,7 +23,7 @@ type SubClassData<Sub extends Subclass> = InstanceOf<Sub> extends BaseNotifier<i
 
 type UseFactoryHook<Sub extends Subclass> =
     <ReturnType = SubClassData<Sub>>(selector?: SelectorFunc<SubClassData<Sub>, ReturnType>) =>
-    ReturnType & PublicMethods<InstanceOf<Sub>>;
+    { state: ReturnType, actions: PublicMethods<InstanceOf<Sub>> };
 
 const defaultSelector: SelectorFunc<any, any> = (state) => state;
 
@@ -39,6 +39,10 @@ export class BaseNotifier<Data> {
     #state: Data;
 
     constructor (initialState: Data) {
+        if (typeof initialState !== 'object' || initialState === null || Array.isArray(initialState)) {
+            throw new Error('Notifier state must be a non-null object');
+        }
+
         this.#initialState = initialState;
         this.#state = initialState;
         this.#serverState = null;
@@ -51,7 +55,7 @@ export class BaseNotifier<Data> {
     }
 
     protected set serverState (state: Data) {
-        if (this.#serverState) {
+        if (this.#serverState !== null) {
             return;
         }
 
@@ -70,17 +74,18 @@ export class BaseNotifier<Data> {
 
     static createFactoryHook <SubClass extends Subclass> (this: SubClass, ...params: ConstructorParams<SubClass>): UseFactoryHook<SubClass> {
         return <ReturnType>(selector?: SelectorFunc<SubClassData<SubClass>, ReturnType>) => {
-            const [instance, setInstance] = useState(() => this.build(...params));
-            const state = instance.createStateHook()(selector);
-            const actors = instance.createActionsHook()();
+            const instanceRef = useRef<InstanceOf<SubClass> | null>(null);
 
-            useEffect(() => {
-                setInstance(this.build(...params));
-            }, [...params]);
+            if (instanceRef.current === null) {
+                instanceRef.current = this.build(...params);
+            }
+
+            const state = instanceRef.current.createStateHook()(selector);
+            const actions = instanceRef.current.createActionsHook()();
 
             return {
-                ...state,
-                ...actors,
+                state: state as ReturnType,
+                actions,
             };
         };
     }
@@ -102,11 +107,12 @@ export class BaseNotifier<Data> {
             const subscribe = useCallback((callback: () => void) => this.#subject.subscribe((state) => {
                 const newState = selectorRef.current(state);
 
-                if (!deepCompare(clientStateRef.current, newState)) {
-                    clientStateRef.current = newState;
-                    // eslint-disable-next-line callback-return
-                    callback();
+                if (deepCompare(clientStateRef.current, newState)) {
+                    return;
                 }
+
+                clientStateRef.current = newState;
+                callback();
             }), []);
 
             useEffect(() => {
@@ -118,7 +124,7 @@ export class BaseNotifier<Data> {
     }
 
     reset (): void {
-        this.#state = this.#initialState;
+        this.state = this.#initialState;
     }
 
     createActionsHook (): UseActorsHook<this> {
@@ -137,43 +143,60 @@ export class BaseNotifier<Data> {
     }
 
     #getPublicMethods (): PublicMethods<this> {
-        const isAccessor = (prop: string, obj: any): boolean => {
+        const objectPrototype = Object.getPrototypeOf({});
+        const objectKeys = Reflect.ownKeys(objectPrototype);
+        const methods = new Set<string>();
+
+        const isAccessor = (prop: string, obj: object): boolean => {
             const descriptor = Object.getOwnPropertyDescriptor(obj, prop);
 
             return Boolean(descriptor && (descriptor.get || descriptor.set));
         };
 
-        function getAllMethodNames (obj: any): string[] {
-            const objectPrototype = Object.getPrototypeOf({});
-            const objectKeys = Reflect.ownKeys(objectPrototype);
-            const methods = new Set<string>();
-
-            // eslint-disable-next-line no-cond-assign
-            while (obj = Reflect.getPrototypeOf(obj)) {
-                const keys = Reflect.ownKeys(obj);
-
-                keys
-                    .map((k) => k.toString())
-                    .filter((name) => !objectKeys.includes(name))
-                    // eslint-disable-next-line no-loop-func
-                    .filter((name) => !isAccessor(name, obj))
-                    .forEach((k) => methods.add(k));
+        const collectMethods = (obj: object | null): void => {
+            if (!obj) {
+                return;
             }
 
-            return Array.from(methods)
-                .filter((k) => !k.startsWith('#') && !k.startsWith('_') && k !== 'constructor');
-        }
+            const proto = Reflect.getPrototypeOf(obj);
 
-        return getAllMethodNames(this)
-            // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-            // @ts-ignore
-            .filter((name) => typeof this[name] === 'function')
-            .reduce((methods, name) => {
-                // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-                // @ts-ignore
-                methods[name] = this[name].bind(this);
+            if (!proto) {
+                return;
+            }
 
-                return methods;
+            Reflect.ownKeys(proto)
+                .map((k) => k.toString())
+                .filter((name) => !objectKeys.includes(name))
+                .filter((name) => !isAccessor(name, proto))
+                .forEach((k) => methods.add(k));
+
+            collectMethods(proto);
+        };
+
+        collectMethods(this);
+
+        const baseClassMethods = [
+            'reset',
+            'subscribe',
+            'createStateHook',
+            'createActionsHook',
+            'updateState',
+        ];
+
+        const methodNames = Array.from(methods)
+            .filter((k) => !k.startsWith('#') && !k.startsWith('_') && k !== 'constructor')
+            .filter((k) => !baseClassMethods.includes(k));
+
+        const self = this as Record<string, unknown>;
+
+        return methodNames
+            .filter((name) => typeof self[name] === 'function')
+            .reduce((acc, name) => {
+                const method = self[name] as (...args: unknown[]) => unknown;
+
+                (acc as Record<string, unknown>)[name] = method.bind(this);
+
+                return acc;
             }, {} as PublicMethods<this>);
     }
 }

@@ -370,8 +370,12 @@ describe('ApiNotifier', () => {
   it('should fetch and update data', async () => {
     const mockApi = new MockApiService();
     const notifier = new ApiNotifier(initialState, mockApi);
+    const useData = notifier.createStateHook();
     await notifier.fetchData();
-    expect(notifier.state.data).toEqual(expectedData);
+    // Use the hook in a component or check via subscription
+    let currentData;
+    notifier.subscribe((state) => { currentData = state.data; });
+    expect(currentData).toEqual(expectedData);
   });
 });
 ```
@@ -406,7 +410,7 @@ class UserNotifier extends LoggingNotifier<UserState> {
 
 ## Contributing
 
-We welcome contributions! Please see our [contributing guidelines](CONTRIBUTING.md) for details.
+We welcome contributions! Please open an issue or submit a pull request on GitHub.
 
 ## License
 

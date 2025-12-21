@@ -1,4 +1,3 @@
-// eslint-disable-next-line import/no-unresolved
 export type Subscriber<T> = (message: T) => void;
 export type Unsubscribe = () => void;
 
