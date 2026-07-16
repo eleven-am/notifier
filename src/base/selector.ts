@@ -1,8 +1,13 @@
-import { useSyncExternalStore, useRef } from 'react';
+import { useRef, useSyncExternalStore } from 'react';
 
 import { BaseNotifier } from './base';
-import { Subject, Unsubscribe } from '../subjects/subject';
+import { Subject, Subscriber, Unsubscribe } from '../subjects/subject';
 import { deepCompare } from '../utils/deepCompare';
+
+export interface SelectorStatus {
+    pending: boolean;
+    error: unknown | null;
+}
 
 type SelectorHook<State> = ReturnType<typeof selector<State>>;
 type SelectorFunc<State, ReturnType> = (state: State) => ReturnType;
@@ -35,18 +40,39 @@ export function selector<ReturnedState> (selectorFn: SelectorHandler<ReturnedSta
     const notifiers = new Set<BaseNotifier<any> | SelectorHook<any>>();
     const unsubscribes: Unsubscribe[] = [];
     const subject = new Subject<ReturnedState>();
+    const statusSubject = new Subject<SelectorStatus>();
 
     let version = 0;
     let subscriberCount = 0;
     let needsInit = false;
     let returnedState: ReturnedState;
     let serverState: ReturnedState;
+    let status: SelectorStatus = Object.freeze({
+        pending: false,
+        error: null,
+    });
 
     function set<NotifierState extends object> (notifier: BaseNotifier<NotifierState>, state: NotifierState): void {
         setNotifierState(notifier, state);
     }
 
+    function setStatus (nextStatus: SelectorStatus): void {
+        if (status.pending === nextStatus.pending && status.error === nextStatus.error) {
+            return;
+        }
+
+        status = Object.freeze(nextStatus);
+        statusSubject.publish(status);
+    }
+
     function handleAsyncResult (promise: Promise<ReturnedState>, currentVersion: number, isServer: boolean): void {
+        if (!isServer) {
+            setStatus({
+                pending: true,
+                error: null,
+            });
+        }
+
         promise
             .then((state) => {
                 if (version !== currentVersion) {
@@ -55,12 +81,26 @@ export function selector<ReturnedState> (selectorFn: SelectorHandler<ReturnedSta
 
                 if (isServer) {
                     serverState = state;
-                } else if (!deepCompare(returnedState, state)) {
-                    returnedState = state;
-                    subject.publish(state);
+                } else {
+                    setStatus({
+                        pending: false,
+                        error: null,
+                    });
+
+                    if (!deepCompare(returnedState, state)) {
+                        returnedState = state;
+                        subject.publish(state);
+                    }
                 }
             })
-            .catch(() => undefined);
+            .catch((error: unknown) => {
+                if (!isServer && version === currentVersion) {
+                    setStatus({
+                        pending: false,
+                        error,
+                    });
+                }
+            });
     }
 
     function subscribeToNotifier (notifier: BaseNotifier<any> | SelectorHook<any>): void {
@@ -78,9 +118,16 @@ export function selector<ReturnedState> (selectorFn: SelectorHandler<ReturnedSta
 
             if (result instanceof Promise) {
                 handleAsyncResult(result, currentVersion, false);
-            } else if (!deepCompare(returnedState, result)) {
-                returnedState = result;
-                subject.publish(result);
+            } else {
+                setStatus({
+                    pending: false,
+                    error: null,
+                });
+
+                if (!deepCompare(returnedState, result)) {
+                    returnedState = result;
+                    subject.publish(result);
+                }
             }
         });
 
@@ -119,10 +166,15 @@ export function selector<ReturnedState> (selectorFn: SelectorHandler<ReturnedSta
     }
 
     function destroy (): void {
+        version++;
         unsubscribes.forEach((unsubscribe) => unsubscribe());
         unsubscribes.length = 0;
         notifiers.clear();
         needsInit = true;
+        setStatus({
+            pending: false,
+            error: null,
+        });
     }
 
     function ensureInitialised (): void {
@@ -134,10 +186,54 @@ export function selector<ReturnedState> (selectorFn: SelectorHandler<ReturnedSta
         needsInit = false;
     }
 
+    function retain (): void {
+        ensureInitialised();
+        subscriberCount += 1;
+    }
+
+    function release (): void {
+        subscriberCount -= 1;
+
+        if (subscriberCount === 0) {
+            destroy();
+        }
+    }
+
+    function subscribeResult (subscriber: Subscriber<ReturnedState>): Unsubscribe {
+        retain();
+        const unsubscribe = subject.subscribe(subscriber);
+
+        return () => {
+            if (!unsubscribe()) {
+                return;
+            }
+
+            release();
+        };
+    }
+
+    function subscribeStatus (subscriber: Subscriber<SelectorStatus>): Unsubscribe {
+        retain();
+        const unsubscribe = statusSubject.subscribe(subscriber);
+
+        return () => {
+            if (!unsubscribe()) {
+                return;
+            }
+
+            release();
+        };
+    }
+
+    const subscribeToStatus = (callback: () => void): Unsubscribe => subscribeStatus(() => callback());
+    const getStatus = (): SelectorStatus => status;
+
     initialiseValues();
 
     return {
-        subscribe: subject.subscribe.bind(subject),
+        subscribe: subscribeResult,
+        subscribeStatus,
+        getStatus,
         getServerSnapshot: () => {
             ensureInitialised();
 
@@ -171,37 +267,25 @@ export function selector<ReturnedState> (selectorFn: SelectorHandler<ReturnedSta
                     : serverState as unknown as ReturnType;
             }
 
-            const subscribe = (callback: () => void) => {
-                ensureInitialised();
-                subscriberCount += 1;
+            const subscribe = (callback: () => void) => subscribeResult((state) => {
+                const newState = selectorFuncRef.current
+                    ? selectorFuncRef.current(state)
+                    : state as unknown as ReturnType;
 
-                const unsubscribe = subject.subscribe((state) => {
-                    const newState = selectorFuncRef.current
-                        ? selectorFuncRef.current(state)
-                        : state as unknown as ReturnType;
+                if (deepCompare(clientStateRef.current, newState)) {
+                    return;
+                }
 
-                    if (deepCompare(clientStateRef.current, newState)) {
-                        return;
-                    }
-
-                    clientStateRef.current = newState;
-                    callback();
-                });
-
-                return () => {
-                    unsubscribe();
-                    subscriberCount -= 1;
-                    if (subscriberCount === 0) {
-                        destroy();
-                    }
-                };
-            };
+                clientStateRef.current = newState;
+                callback();
+            });
 
             const getSnapshot = () => clientStateRef.current;
             const getServerSnapshot = () => serverStateRef.current;
 
             return useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
         },
+        createStatusHook: () => () => useSyncExternalStore(subscribeToStatus, getStatus, getStatus),
         destroy,
     };
 }

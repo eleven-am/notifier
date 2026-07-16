@@ -13,95 +13,56 @@ describe('EventSubject', () => {
         eventSubject = new EventSubject<TestEvents>();
     });
 
-    it('should subscribe to specific events', () => {
-        const messageHandler = jest.fn();
-        const countHandler = jest.fn();
+    it('should publish only to subscribers of an event', () => {
+        const messageObserver = jest.fn();
+        const countObserver = jest.fn();
 
-        eventSubject.subscribe('message', messageHandler);
-        eventSubject.subscribe('count', countHandler);
-
+        eventSubject.subscribe('message', messageObserver);
+        eventSubject.subscribe('count', countObserver);
         eventSubject.publish('message', 'hello');
 
-        expect(messageHandler).toHaveBeenCalledWith('hello');
-        expect(countHandler).not.toHaveBeenCalled();
+        expect(messageObserver).toHaveBeenCalledWith('hello');
+        expect(countObserver).not.toHaveBeenCalled();
     });
 
-    it('should publish to all subscribers of an event', () => {
-        const handler1 = jest.fn();
-        const handler2 = jest.fn();
+    it('should support every event payload in the event map', () => {
+        const countObserver = jest.fn();
+        const dataObserver = jest.fn();
+        const data = { id: 1, name: 'test' };
 
-        eventSubject.subscribe('message', handler1);
-        eventSubject.subscribe('message', handler2);
+        eventSubject.subscribe('count', countObserver);
+        eventSubject.subscribe('data', dataObserver);
+        eventSubject.publish('count', 2);
+        eventSubject.publish('data', data);
 
-        eventSubject.publish('message', 'test');
-
-        expect(handler1).toHaveBeenCalledWith('test');
-        expect(handler2).toHaveBeenCalledWith('test');
+        expect(countObserver).toHaveBeenCalledWith(2);
+        expect(dataObserver).toHaveBeenCalledWith(data);
     });
 
-    it('should unsubscribe correctly', () => {
-        const handler = jest.fn();
-        const unsubscribe = eventSubject.subscribe('message', handler);
-
-        eventSubject.publish('message', 'first');
-
-        expect(handler).toHaveBeenCalledTimes(1);
-
-        unsubscribe();
-
-        eventSubject.publish('message', 'second');
-
-        expect(handler).toHaveBeenCalledTimes(1);
-    });
-
-    it('should handle complex event data', () => {
-        const handler = jest.fn();
-
-        eventSubject.subscribe('data', handler);
-
-        const testData = { id: 1, name: 'test' };
-
-        eventSubject.publish('data', testData);
-
-        expect(handler).toHaveBeenCalledWith(testData);
-    });
-
-    it('should return correct size', () => {
-        expect(eventSubject.size).toBe(0);
-
-        eventSubject.subscribe('message', jest.fn());
+    it('should inherit subscription ownership and cleanup', () => {
+        const observer = jest.fn();
+        const unsubscribe = eventSubject.subscribe('message', observer);
 
         expect(eventSubject.size).toBe(1);
+        unsubscribe();
+        unsubscribe();
+        expect(eventSubject.size).toBe(0);
 
-        eventSubject.subscribe('count', jest.fn());
+        eventSubject.publish('message', 'ignored');
+        expect(observer).not.toHaveBeenCalled();
+    });
+
+    it('should own repeated subscriptions independently', () => {
+        const observer = jest.fn();
+        const unsubscribeFirst = eventSubject.subscribe('message', observer);
+        const unsubscribeSecond = eventSubject.subscribe('message', observer);
 
         expect(eventSubject.size).toBe(2);
-    });
+        unsubscribeFirst();
+        eventSubject.publish('message', 'hello');
+        expect(observer).toHaveBeenCalledTimes(1);
 
-    it('should not fail when publishing to event with no subscribers', () => {
-        expect(() => {
-            eventSubject.publish('message', 'test');
-        }).not.toThrow();
-    });
-
-    it('should handle multiple unsubscribes from same event', () => {
-        const handler1 = jest.fn();
-        const handler2 = jest.fn();
-
-        const unsub1 = eventSubject.subscribe('message', handler1);
-        const unsub2 = eventSubject.subscribe('message', handler2);
-
-        unsub1();
-
-        eventSubject.publish('message', 'test');
-
-        expect(handler1).not.toHaveBeenCalled();
-        expect(handler2).toHaveBeenCalledWith('test');
-
-        unsub2();
-
-        eventSubject.publish('message', 'test2');
-
-        expect(handler2).toHaveBeenCalledTimes(1);
+        unsubscribeSecond();
+        expect(eventSubject.size).toBe(0);
     });
 });

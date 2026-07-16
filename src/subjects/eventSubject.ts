@@ -1,38 +1,33 @@
-import { Subscriber, Unsubscribe } from './subject';
+import { Subject, Subscriber, Unsubscribe } from './subject';
 
-type EventObserverMap<EventType> = Map<keyof EventType, Set<Subscriber<any>>>;
+type EventMessage<EventType extends Record<string, any>> = {
+    [Event in keyof EventType]: {
+        event: Event;
+        payload: EventType[Event];
+    };
+}[keyof EventType];
 
 export class EventSubject<EventType extends Record<string, any>> {
-    readonly #observers: EventObserverMap<EventType>;
-
-    constructor () {
-        this.#observers = new Map();
-    }
+    readonly #subject = new Subject<EventMessage<EventType>>();
 
     get size () {
-        return this.#observers.size;
+        return this.#subject.size;
     }
 
     subscribe <Event extends keyof EventType> (event: Event, observer: Subscriber<EventType[Event]>): Unsubscribe {
-        let observers = this.#observers.get(event);
+        return this.#subject.subscribe((message) => {
+            if (message.event === event) {
+                return observer(message.payload as EventType[Event]);
+            }
 
-        if (!observers) {
-            observers = new Set();
-            this.#observers.set(event, observers);
-        }
-
-        observers.add(observer);
-
-        return () => {
-            observers.delete(observer);
-        };
+            return undefined;
+        });
     }
 
-    publish <Event extends keyof EventType> (event: Event, message: EventType[Event]): void {
-        const observers = this.#observers.get(event);
-
-        if (observers) {
-            observers.forEach((observer) => observer(message));
-        }
+    publish <Event extends keyof EventType> (event: Event, payload: EventType[Event]): void {
+        this.#subject.publish({
+            event,
+            payload,
+        } as EventMessage<EventType>);
     }
 }

@@ -199,6 +199,41 @@ describe('deepCompare', () => {
 
             expect(deepCompare(arr1, arr2)).toBe(true);
         });
+
+        it('should not treat a previously visited object as equal to a different object', () => {
+            const first = {
+                primary: { value: 1 },
+                secondary: { value: 2 },
+            };
+            const shared = { value: 1 };
+            const second = {
+                primary: shared,
+                secondary: shared,
+            };
+
+            expect(deepCompare(first, second)).toBe(false);
+        });
+
+        it('should compare one shared object against multiple matching objects', () => {
+            const shared = { value: 1 };
+            const first = { primary: shared, secondary: shared };
+            const second = {
+                primary: { value: 1 },
+                secondary: { value: 1 },
+            };
+
+            expect(deepCompare(first, second)).toBe(true);
+        });
+
+        it('should handle circular map values', () => {
+            const first = new Map<string, unknown>();
+            const second = new Map<string, unknown>();
+
+            first.set('self', first);
+            second.set('self', second);
+
+            expect(deepCompare(first, second)).toBe(true);
+        });
     });
 
     describe('mixed types', () => {

@@ -168,6 +168,22 @@ describe('selector', () => {
 
             derived.destroy();
         });
+
+        it('should keep source subscriptions while a direct subscriber remains', () => {
+            const counter = new CounterNotifier({ count: 0 });
+            const subscriber = jest.fn();
+            const derived = selector((get) => get(counter).count);
+            const unsubscribe = derived.subscribe(subscriber);
+            const useDerivedState = derived.createStateHook();
+            const { unmount } = renderHook(() => useDerivedState());
+
+            unmount();
+            counter.increment();
+
+            expect(subscriber).toHaveBeenCalledWith(1);
+
+            unsubscribe();
+        });
     });
 
     describe('set function', () => {
@@ -203,9 +219,13 @@ describe('selector', () => {
                 return state.count * 2;
             });
 
+            expect(derived.getStatus()).toEqual({ pending: true, error: null });
+
             await waitFor(() => {
                 expect(derived.getSnapshot()).toBe(10);
             });
+
+            expect(derived.getStatus()).toEqual({ pending: false, error: null });
 
             derived.destroy();
         });
@@ -234,7 +254,7 @@ describe('selector', () => {
             derived.destroy();
         });
 
-        it('should silently catch errors in async selectors', async () => {
+        it('should expose errors in async selectors without discarding the last value', async () => {
             const counter = new CounterNotifier({ count: 0 });
 
             const derived = selector(async (get) => {
@@ -253,9 +273,35 @@ describe('selector', () => {
 
             counter.increment();
 
-            await new Promise((resolve) => setTimeout(resolve, 50));
+            await waitFor(() => {
+                expect(derived.getStatus()).toEqual({
+                    pending: false,
+                    error: expect.objectContaining({ message: 'Test error' }),
+                });
+            });
 
             expect(derived.getSnapshot()).toBe(0);
+
+            derived.destroy();
+        });
+
+        it('should expose async status through a React hook', async () => {
+            const counter = new CounterNotifier({ count: 1 });
+            const derived = selector(async (get) => {
+                const count = get(counter).count;
+
+                await new Promise((resolve) => setTimeout(resolve, 10));
+
+                return count;
+            });
+            const useStatus = derived.createStatusHook();
+            const { result } = renderHook(() => useStatus());
+
+            expect(result.current.pending).toBe(true);
+
+            await waitFor(() => {
+                expect(result.current).toEqual({ pending: false, error: null });
+            });
 
             derived.destroy();
         });

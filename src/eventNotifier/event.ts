@@ -28,7 +28,7 @@ export class EventNotifier<State extends object, EventType extends Record<string
             callbackRef.current = callback;
 
             useEffect(() => {
-                const unsubscribe = this.#subject.subscribe(event, (data) => {
+                const unsubscribe = this.on(event, (data) => {
                     callbackRef.current(data);
                 });
 

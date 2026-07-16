@@ -68,4 +68,28 @@ describe('Subject', () => {
         expect(observer1).toHaveBeenNthCalledWith(2, 2);
         expect(observer1).toHaveBeenNthCalledWith(3, 3);
     });
+
+    it('should make unsubscribe idempotent', () => {
+        const unsubscribe = testSubject.subscribe(observer1);
+
+        expect(unsubscribe()).toBe(true);
+        expect(unsubscribe()).toBe(false);
+        expect(testSubject.size).toBe(0);
+    });
+
+    it('should own repeated subscriptions independently', () => {
+        const unsubscribeFirst = testSubject.subscribe(observer1);
+        const unsubscribeSecond = testSubject.subscribe(observer1);
+
+        expect(testSubject.size).toBe(2);
+        testSubject.publish(1);
+        expect(observer1).toHaveBeenCalledTimes(2);
+
+        unsubscribeFirst();
+        testSubject.publish(2);
+        expect(observer1).toHaveBeenCalledTimes(3);
+
+        unsubscribeSecond();
+        expect(testSubject.size).toBe(0);
+    });
 });

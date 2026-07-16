@@ -19,10 +19,12 @@ export class Subject<T> {
      * @desc Subscribes to a subject
      * @param observer - The observer to subscribe
      */
-    subscribe (observer: Subscriber<T>): Unsubscribe {
-        this.#observers.add(observer);
+    subscribe (observer: Subscriber<T>): () => boolean {
+        const subscription = (message: T) => observer(message);
 
-        return () => this.#observers.delete(observer);
+        this.#observers.add(subscription);
+
+        return () => this.#observers.delete(subscription);
     }
 
     /**
@@ -33,4 +35,3 @@ export class Subject<T> {
         this.#observers.forEach((observer) => observer(message));
     }
 }
-

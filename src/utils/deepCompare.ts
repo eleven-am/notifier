@@ -1,4 +1,22 @@
-export function deepCompare (firstObject: any, secondObject: any, seen = new WeakSet()): boolean {
+type SeenPairs = WeakMap<object, WeakSet<object>>;
+
+function hasSeenPair (firstObject: object, secondObject: object, seen: SeenPairs): boolean {
+    const matches = seen.get(firstObject);
+
+    if (matches?.has(secondObject)) {
+        return true;
+    }
+
+    if (matches) {
+        matches.add(secondObject);
+    } else {
+        seen.set(firstObject, new WeakSet([secondObject]));
+    }
+
+    return false;
+}
+
+export function deepCompare (firstObject: any, secondObject: any, seen: SeenPairs = new WeakMap()): boolean {
     if (firstObject === secondObject) {
         return true;
     }
@@ -20,12 +38,9 @@ export function deepCompare (firstObject: any, secondObject: any, seen = new Wea
             return false;
         }
 
-        if (seen.has(firstObject) || seen.has(secondObject)) {
+        if (hasSeenPair(firstObject, secondObject, seen)) {
             return true;
         }
-
-        seen.add(firstObject);
-        seen.add(secondObject);
 
         return firstObject.every((item, index) => deepCompare(item, secondObject[index], seen));
     }
@@ -33,6 +48,10 @@ export function deepCompare (firstObject: any, secondObject: any, seen = new Wea
     if (firstObject instanceof Map && secondObject instanceof Map) {
         if (firstObject.size !== secondObject.size) {
             return false;
+        }
+
+        if (hasSeenPair(firstObject, secondObject, seen)) {
+            return true;
         }
 
         for (const [key, value] of firstObject) {
@@ -63,12 +82,9 @@ export function deepCompare (firstObject: any, secondObject: any, seen = new Wea
             return false;
         }
 
-        if (seen.has(firstObject) || seen.has(secondObject)) {
+        if (hasSeenPair(firstObject, secondObject, seen)) {
             return true;
         }
-
-        seen.add(firstObject);
-        seen.add(secondObject);
 
         const properties = Object.keys(firstObject);
 

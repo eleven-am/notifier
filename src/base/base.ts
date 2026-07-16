@@ -117,7 +117,7 @@ export class BaseNotifier<Data extends object> {
             const getSnapshot = useCallback(() => clientStateRef.current, []);
             const getServerSnapshot = useCallback(() => serverStateRef.current, []);
 
-            const subscribe = useCallback((callback: () => void) => this.#subject.subscribe((state) => {
+            const subscribe = useCallback((callback: () => void) => this.subscribe((state) => {
                 const newState = selectorRef.current(state);
 
                 if (deepCompare(clientStateRef.current, newState)) {
@@ -141,7 +141,35 @@ export class BaseNotifier<Data extends object> {
     }
 
     subscribe (subscriber: Subscriber<Data>): Unsubscribe {
-        return this.#subject.subscribe(subscriber);
+        const wasEmpty = this.#subject.size === 0;
+        const unsubscribe = this.#subject.subscribe(subscriber);
+
+        if (wasEmpty) {
+            try {
+                this.onFirstSubscriber();
+            } catch (error) {
+                unsubscribe();
+                throw error;
+            }
+        }
+
+        return () => {
+            if (!unsubscribe()) {
+                return;
+            }
+
+            if (this.#subject.size === 0) {
+                this.onLastSubscriber();
+            }
+        };
+    }
+
+    protected onFirstSubscriber (): void {
+        // Optional lifecycle hook for subclasses that own external resources.
+    }
+
+    protected onLastSubscriber (): void {
+        // Optional lifecycle hook for subclasses that own external resources.
     }
 
     protected updateState (state: Partial<Data>): void {
@@ -190,6 +218,8 @@ export class BaseNotifier<Data extends object> {
             'createStateHook',
             'createActionsHook',
             'updateState',
+            'onFirstSubscriber',
+            'onLastSubscriber',
         ];
 
         const methodNames = Array.from(methods)

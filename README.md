@@ -14,6 +14,7 @@ A powerful and type-safe state management solution for React applications, featu
 - 🎣 **Custom Hooks**: Generate specialized hooks for state, actions, and events
 - 🏭 **Factory Pattern**: Create local state instances from global notifiers
 - 🔒 **Encapsulation**: Protected state access with controlled updates
+- 🔌 **Resource Lifecycle**: Start and stop external resources with the first and last subscriber
 
 ## Installation
 
@@ -91,7 +92,7 @@ The factory pattern allows you to create local instances of a notifier, enabling
 
 ```typescript
 // Create a factory hook with initial state
-const userFactory = UserNotifier.createFactoryHook({
+const useUserFactory = UserNotifier.createFactoryHook({
   name: 'John Doe',
   age: 25
 });
@@ -99,12 +100,16 @@ const userFactory = UserNotifier.createFactoryHook({
 // Use in components for local state management
 function UserCard() {
   // Each component gets its own instance of the state
-  const { name, age } = userFactory();
+  const { state, actions } = useUserFactory();
+  const { name, age } = state;
   
   return (
     <div>
       <h2>{name}</h2>
       <p>Age: {age}</p>
+      <button onClick={() => actions.setAge(age + 1)}>
+        Birthday
+      </button>
     </div>
   );
 }
@@ -173,6 +178,56 @@ const userDetailsSelector = selector((get, set) => {
 const useUserDetails = userDetailsSelector.createStateHook();
 ```
 
+Async selectors also expose their current execution status without replacing the
+last successful value when a later calculation fails:
+
+```typescript
+const searchResults = selector(async (get) => {
+  const { query } = get(searchNotifier);
+  return api.search(query);
+});
+
+const useSearchResults = searchResults.createStateHook();
+const useSearchStatus = searchResults.createStatusHook();
+
+function SearchResults() {
+  const results = useSearchResults();
+  const { pending, error } = useSearchStatus();
+
+  if (pending && !results) return <p>Searching…</p>;
+  if (error) return <p>The latest search failed.</p>;
+
+  return <Results items={results} />;
+}
+```
+
+For non-React consumers, use `subscribeStatus()` and `getStatus()`. When no
+result or status subscribers remain, the selector releases its upstream
+subscriptions and reconnects automatically when it is used again.
+
+### Subscriber Lifecycle
+
+Notifiers that own an external resource can start it when the first direct or
+React subscriber arrives and stop it after the last subscriber leaves:
+
+```typescript
+class ConnectionNotifier extends Notifier<ConnectionState> {
+  private socket?: WebSocket;
+
+  protected onFirstSubscriber() {
+    this.socket = new WebSocket('/events');
+  }
+
+  protected onLastSubscriber() {
+    this.socket?.close();
+    this.socket = undefined;
+  }
+}
+```
+
+Each hook mount and direct `subscribe()` call participates in the same lifecycle.
+The returned unsubscribe function is safe to call more than once.
+
 ### Event Notifier
 
 Handle pub/sub events between components:
@@ -221,6 +276,11 @@ function ChatRoom() {
   }, [on]);
 }
 ```
+
+Events are transient, in-memory notifications. A new subscriber receives only
+events emitted after it subscribes; persistent application data belongs in the
+notifier state (or another durable store). Event subscriptions use the same
+idempotent cleanup behavior as normal state subscriptions.
 
 ## Type Definitions
 
@@ -370,12 +430,15 @@ describe('ApiNotifier', () => {
   it('should fetch and update data', async () => {
     const mockApi = new MockApiService();
     const notifier = new ApiNotifier(initialState, mockApi);
-    const useData = notifier.createStateHook();
-    await notifier.fetchData();
-    // Use the hook in a component or check via subscription
     let currentData;
-    notifier.subscribe((state) => { currentData = state.data; });
+    const unsubscribe = notifier.subscribe((state) => {
+      currentData = state.data;
+    });
+
+    await notifier.fetchData();
+
     expect(currentData).toEqual(expectedData);
+    unsubscribe();
   });
 });
 ```
@@ -407,6 +470,7 @@ class UserNotifier extends LoggingNotifier<UserState> {
 4. **Selector Memoization**: Use selectors for computed values that depend on multiple state sources
 5. **Type Safety**: Leverage TypeScript interfaces for state and event types
 6. **Encapsulation**: Keep state modifications within the notifier class methods
+7. **Durability**: Treat events as transient signals; keep durable values in state or persistent storage
 
 ## Contributing
 

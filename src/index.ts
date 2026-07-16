@@ -1,5 +1,5 @@
 import { BaseNotifier as Notifier, UseNotifierHook } from './base/base';
-import { selector, getSnapshot } from './base/selector';
+import { selector, getSnapshot, SelectorStatus } from './base/selector';
 import { EventNotifier, UseEventHook } from './eventNotifier/event';
 import { Subscriber, Unsubscribe } from './subjects/subject';
 
@@ -15,4 +15,5 @@ export type {
     UseEventHook,
     Subscriber,
     Unsubscribe,
+    SelectorStatus,
 };

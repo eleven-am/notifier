@@ -173,6 +173,65 @@ describe('BaseNotifier', () => {
             notifier.increment();
             expect(subscriber).toHaveBeenCalledTimes(1);
         });
+
+        it('should run first and last subscriber lifecycle hooks once per active group', () => {
+            class LifecycleNotifier extends TestNotifier {
+                readonly first = jest.fn();
+
+                readonly last = jest.fn();
+
+                protected onFirstSubscriber (): void {
+                    this.first();
+                }
+
+                protected onLastSubscriber (): void {
+                    this.last();
+                }
+            }
+
+            const notifier = new LifecycleNotifier({ count: 0, name: 'test' });
+            const unsubscribeFirst = notifier.subscribe(jest.fn());
+            const unsubscribeSecond = notifier.subscribe(jest.fn());
+
+            expect(notifier.first).toHaveBeenCalledTimes(1);
+
+            unsubscribeFirst();
+            unsubscribeFirst();
+            expect(notifier.last).not.toHaveBeenCalled();
+
+            unsubscribeSecond();
+            expect(notifier.last).toHaveBeenCalledTimes(1);
+
+            const unsubscribeThird = notifier.subscribe(jest.fn());
+            expect(notifier.first).toHaveBeenCalledTimes(2);
+            unsubscribeThird();
+            expect(notifier.last).toHaveBeenCalledTimes(2);
+        });
+
+        it('should use lifecycle-aware subscriptions from generated React hooks', () => {
+            class LifecycleNotifier extends TestNotifier {
+                readonly first = jest.fn();
+
+                readonly last = jest.fn();
+
+                protected onFirstSubscriber (): void {
+                    this.first();
+                }
+
+                protected onLastSubscriber (): void {
+                    this.last();
+                }
+            }
+
+            const notifier = new LifecycleNotifier({ count: 0, name: 'test' });
+            const useState = notifier.createStateHook();
+            const { unmount } = renderHook(() => useState());
+
+            expect(notifier.first).toHaveBeenCalledTimes(1);
+
+            unmount();
+            expect(notifier.last).toHaveBeenCalledTimes(1);
+        });
     });
 
     describe('createStateHook', () => {
@@ -319,6 +378,8 @@ describe('BaseNotifier', () => {
             expect((result.current as any).createStateHook).toBeUndefined();
             expect((result.current as any).createActionsHook).toBeUndefined();
             expect((result.current as any).updateState).toBeUndefined();
+            expect((result.current as any).onFirstSubscriber).toBeUndefined();
+            expect((result.current as any).onLastSubscriber).toBeUndefined();
         });
 
         it('should not expose private methods starting with underscore', () => {
