@@ -245,12 +245,14 @@ export function selector<ReturnedState> (selectorFn: SelectorHandler<ReturnedSta
             return returnedState;
         },
         createStateHook: (): UseNotifierHook<ReturnedState> => <ReturnType>(selectorFunc?: SelectorFunc<ReturnedState, ReturnType>): ReturnType => {
+            const deriveClient = (fn?: SelectorFunc<ReturnedState, ReturnType>): ReturnType => {
+                ensureInitialised();
+
+                return fn ? fn(returnedState) : returnedState as unknown as ReturnType;
+            };
+
             const selectorFuncRef = useRef(selectorFunc);
-            const clientStateRef = useRef(
-                selectorFunc
-                    ? selectorFunc(returnedState)
-                    : returnedState as unknown as ReturnType,
-            );
+            const clientStateRef = useRef(deriveClient(selectorFunc));
             const serverStateRef = useRef(
                 selectorFunc
                     ? selectorFunc(serverState)
@@ -259,28 +261,23 @@ export function selector<ReturnedState> (selectorFn: SelectorHandler<ReturnedSta
 
             if (selectorFuncRef.current !== selectorFunc) {
                 selectorFuncRef.current = selectorFunc;
-                clientStateRef.current = selectorFunc
-                    ? selectorFunc(returnedState)
-                    : returnedState as unknown as ReturnType;
+                clientStateRef.current = deriveClient(selectorFunc);
                 serverStateRef.current = selectorFunc
                     ? selectorFunc(serverState)
                     : serverState as unknown as ReturnType;
             }
 
-            const subscribe = (callback: () => void) => subscribeResult((state) => {
-                const newState = selectorFuncRef.current
-                    ? selectorFuncRef.current(state)
-                    : state as unknown as ReturnType;
+            const subscribe = (callback: () => void) => subscribeResult(() => callback());
 
-                if (deepCompare(clientStateRef.current, newState)) {
-                    return;
+            const getSnapshot = () => {
+                const next = deriveClient(selectorFuncRef.current);
+
+                if (!deepCompare(clientStateRef.current, next)) {
+                    clientStateRef.current = next;
                 }
 
-                clientStateRef.current = newState;
-                callback();
-            });
-
-            const getSnapshot = () => clientStateRef.current;
+                return clientStateRef.current;
+            };
             const getServerSnapshot = () => serverStateRef.current;
 
             return useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);

@@ -497,6 +497,54 @@ describe('selector', () => {
 
             derived.destroy();
         });
+
+        it('should render the current value when remounted after the last subscriber left', () => {
+            const counter = new CounterNotifier({ count: 1 });
+
+            const derived = selector((get) => get(counter).count);
+
+            const useDerivedState = derived.createStateHook();
+
+            const first = renderHook(() => useDerivedState());
+
+            expect(first.result.current).toBe(1);
+
+            first.unmount();
+
+            act(() => {
+                counter.setCount(7);
+            });
+
+            const second = renderHook(() => useDerivedState());
+
+            expect(second.result.current).toBe(7);
+
+            derived.destroy();
+        });
+
+        it('should render the current selected value when remounted with a selector', () => {
+            const counter = new CounterNotifier({ count: 1 });
+
+            const derived = selector((get) => ({ count: get(counter).count }));
+
+            const useDerivedState = derived.createStateHook();
+
+            const first = renderHook(() => useDerivedState((state) => state.count * 2));
+
+            expect(first.result.current).toBe(2);
+
+            first.unmount();
+
+            act(() => {
+                counter.setCount(7);
+            });
+
+            const second = renderHook(() => useDerivedState((state) => state.count * 2));
+
+            expect(second.result.current).toBe(14);
+
+            derived.destroy();
+        });
     });
 
     describe('nested selectors', () => {
