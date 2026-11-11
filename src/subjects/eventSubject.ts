@@ -1,4 +1,4 @@
-import { Subject, Subscriber, Unsubscribe } from './subject';
+import { ErrorHandler, Subject, Subscriber, Unsubscribe } from './subject';
 
 type EventMessage<EventType extends Record<string, any>> = {
     [Event in keyof EventType]: {
@@ -8,7 +8,11 @@ type EventMessage<EventType extends Record<string, any>> = {
 }[keyof EventType];
 
 export class EventSubject<EventType extends Record<string, any>> {
-    readonly #subject = new Subject<EventMessage<EventType>>();
+    readonly #subject: Subject<EventMessage<EventType>>;
+
+    constructor (onError?: ErrorHandler) {
+        this.#subject = new Subject<EventMessage<EventType>>(onError);
+    }
 
     get size () {
         return this.#subject.size;

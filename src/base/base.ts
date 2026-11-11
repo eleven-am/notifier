@@ -1,7 +1,7 @@
-import { useSyncExternalStore, useRef, useCallback } from 'react';
+import { useRef } from 'react';
 
+import { useSelected } from './useSelected';
 import { Subject, Unsubscribe, Subscriber } from '../subjects/subject';
-import { deepCompare } from '../utils/deepCompare';
 
 type ClassMethods<T> = {
     [K in keyof T]: T[K] extends (...args: any[]) => any ? T[K] : never;
@@ -38,6 +38,14 @@ export class BaseNotifier<Data extends object> {
 
     #state: Data;
 
+    readonly #subscribeHook = (callback: () => void): Unsubscribe => this.subscribe(() => callback());
+
+    readonly #read = (): Data => this.#state;
+
+    readonly #readServer = (): Data => this.serverState;
+
+    readonly #useState: UseNotifierHook<Data> = <ReturnType>(selector: SelectorFunc<Data, ReturnType> = defaultSelector) => useSelected(this.#subscribeHook, this.#read, this.#readServer, selector);
+
     constructor (initialState: Data) {
         if (typeof initialState !== 'object' || initialState === null || Array.isArray(initialState)) {
             throw new Error('Notifier state must be a non-null object');
@@ -46,7 +54,7 @@ export class BaseNotifier<Data extends object> {
         this.#initialState = initialState;
         this.#state = initialState;
         this.#serverState = null;
-        this.#subject = new Subject<Data>();
+        this.#subject = new Subject<Data>((error) => this.onError(error));
         this.#actors = this.#getPublicMethods();
     }
 
@@ -103,33 +111,7 @@ export class BaseNotifier<Data extends object> {
     }
 
     createStateHook (): UseNotifierHook<Data> {
-        return <ReturnType>(selector: SelectorFunc<Data, ReturnType> = defaultSelector) => {
-            const selectorRef = useRef(selector);
-            const clientStateRef = useRef(selectorRef.current(this.state));
-            const serverStateRef = useRef(selectorRef.current(this.serverState));
-
-            if (selectorRef.current !== selector) {
-                selectorRef.current = selector;
-                clientStateRef.current = selector(this.state);
-                serverStateRef.current = selector(this.serverState);
-            }
-
-            const getSnapshot = useCallback(() => clientStateRef.current, []);
-            const getServerSnapshot = useCallback(() => serverStateRef.current, []);
-
-            const subscribe = useCallback((callback: () => void) => this.subscribe((state) => {
-                const newState = selectorRef.current(state);
-
-                if (deepCompare(clientStateRef.current, newState)) {
-                    return;
-                }
-
-                clientStateRef.current = newState;
-                callback();
-            }), []);
-
-            return useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
-        };
+        return this.#useState;
     }
 
     reset (): void {
@@ -167,6 +149,15 @@ export class BaseNotifier<Data extends object> {
     protected onFirstSubscriber (): void {}
 
     protected onLastSubscriber (): void {}
+
+    /**
+     * Receives any error a subscriber or event listener throws, so one failing listener
+     * never breaks the action that changed state or the other listeners.
+     * Defaults to console.error; override to route errors elsewhere.
+     */
+    protected onError (error: unknown): void {
+        console.error(error);
+    }
 
     protected updateState (state: Partial<Data>): void {
         this.state = {
@@ -216,6 +207,7 @@ export class BaseNotifier<Data extends object> {
             'updateState',
             'onFirstSubscriber',
             'onLastSubscriber',
+            'onError',
         ];
 
         const methodNames = Array.from(methods)

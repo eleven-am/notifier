@@ -1,4 +1,5 @@
 import { renderHook, act, waitFor } from '@testing-library/react';
+import { StrictMode } from 'react';
 
 import { selector, getSnapshot } from './selector';
 import { BaseNotifier } from './base';
@@ -186,6 +187,366 @@ describe('selector', () => {
         });
     });
 
+    describe('sync selector errors', () => {
+        it('should keep the last value and expose the error when a sync selector throws', () => {
+            const counter = new CounterNotifier({ count: 0 });
+            const derived = selector((get) => {
+                const { count } = get(counter);
+
+                if (count === 1) {
+                    throw new Error('sync failure');
+                }
+
+                return count * 10;
+            });
+            const subscriber = jest.fn();
+
+            derived.subscribe(subscriber);
+
+            expect(() => counter.increment()).not.toThrow();
+            expect(derived.getSnapshot()).toBe(0);
+            expect(derived.getStatus()).toEqual({
+                pending: false,
+                error: expect.objectContaining({ message: 'sync failure' }),
+            });
+            expect(subscriber).not.toHaveBeenCalled();
+
+            counter.increment();
+
+            expect(derived.getSnapshot()).toBe(20);
+            expect(derived.getStatus()).toEqual({ pending: false, error: null });
+
+            derived.destroy();
+        });
+
+        it('should expose the error when a sync selector throws on its first run', () => {
+            const counter = new CounterNotifier({ count: 1 });
+            const derived = selector((get) => {
+                if (get(counter).count === 1) {
+                    throw new Error('first run failure');
+                }
+
+                return 'ok';
+            });
+
+            expect(derived.getStatus().error).toEqual(expect.objectContaining({ message: 'first run failure' }));
+
+            counter.increment();
+
+            expect(derived.getSnapshot()).toBe('ok');
+            expect(derived.getStatus().error).toBeNull();
+
+            derived.destroy();
+        });
+    });
+
+    describe('hook subscription stability', () => {
+        it('should not re-run the selector when a component re-renders', () => {
+            const counter = new CounterNotifier({ count: 0 });
+            let runs = 0;
+            const derived = selector((get) => {
+                runs++;
+
+                return get(counter).count;
+            });
+            const useDerived = derived.createStateHook();
+            const { rerender } = renderHook(() => useDerived());
+            const runsAfterMount = runs;
+
+            rerender();
+            rerender();
+            rerender();
+
+            expect(runs).toBe(runsAfterMount);
+
+            derived.destroy();
+        });
+
+        it('should keep the same reference when an inline selector returns an equal value on re-render', () => {
+            const counter = new CounterNotifier({ count: 1 });
+            const derived = selector((get) => get(counter).count);
+            const useDerived = derived.createStateHook();
+            const { result, rerender } = renderHook(() => useDerived((count) => ({ count })));
+            const first = result.current;
+
+            rerender();
+
+            expect(result.current).toBe(first);
+
+            derived.destroy();
+        });
+    });
+
+    describe('lazy start', () => {
+        it('should not run the selector until something reads it', () => {
+            const counter = new CounterNotifier({ count: 1 });
+            let runs = 0;
+            const derived = selector((get) => {
+                runs++;
+
+                return get(counter).count;
+            });
+
+            expect(runs).toBe(0);
+            expect(derived.getSnapshot()).toBe(1);
+            expect(runs).toBe(1);
+
+            derived.destroy();
+        });
+
+        it('should compute the server value only when it is asked for', () => {
+            const counter = new CounterNotifier({ count: 2 });
+            let runs = 0;
+            const derived = selector((get) => {
+                runs++;
+
+                return get(counter).count * 2;
+            });
+
+            derived.subscribe(() => undefined);
+            expect(runs).toBe(1);
+
+            expect(derived.getServerSnapshot()).toBe(4);
+            expect(runs).toBe(2);
+
+            expect(derived.getServerSnapshot()).toBe(4);
+            expect(runs).toBe(2);
+
+            derived.destroy();
+        });
+    });
+
+    describe('cancellation', () => {
+        it('should abort the previous async run when a newer one starts', async () => {
+            const counter = new CounterNotifier({ count: 0 });
+            const signals: AbortSignal[] = [];
+            const derived = selector(async (get, _set, signal) => {
+                signals.push(signal);
+                const { count } = get(counter);
+
+                await new Promise((resolve) => setTimeout(resolve, 5));
+
+                return count;
+            });
+
+            derived.subscribe(() => undefined);
+            counter.increment();
+
+            expect(signals).toHaveLength(2);
+            expect(signals[0].aborted).toBe(true);
+            expect(signals[1].aborted).toBe(false);
+
+            await waitFor(() => {
+                expect(derived.getSnapshot()).toBe(1);
+            });
+
+            derived.destroy();
+        });
+
+        it('should never hand the signal of a finished sync run to a later run', () => {
+            const counter = new CounterNotifier({ count: 0 });
+            const signals: AbortSignal[] = [];
+            const derived = selector((get, _set, signal) => {
+                signals.push(signal);
+
+                return get(counter).count;
+            });
+
+            derived.subscribe(() => undefined);
+            counter.increment();
+
+            expect(signals).toHaveLength(2);
+            expect(signals[0]).not.toBe(signals[1]);
+
+            derived.destroy();
+        });
+
+        it('should abort the in-flight run on destroy', () => {
+            const counter = new CounterNotifier({ count: 0 });
+            let seen: AbortSignal | undefined;
+            const derived = selector(async (get, _set, signal) => {
+                seen = signal;
+
+                return get(counter).count;
+            });
+
+            derived.subscribe(() => undefined);
+            derived.destroy();
+
+            expect(seen?.aborted).toBe(true);
+        });
+    });
+
+    describe('dependency tracking', () => {
+        it('should stop recomputing for a source the selector no longer reads', () => {
+            const flag = new CounterNotifier({ count: 0 });
+            const first = new CounterNotifier({ count: 10 });
+            const second = new CounterNotifier({ count: 20 });
+            let runs = 0;
+            const derived = selector((get) => {
+                runs++;
+
+                return get(flag).count === 0 ? get(first).count : get(second).count;
+            });
+
+            derived.subscribe(() => undefined);
+            flag.increment();
+            expect(derived.getSnapshot()).toBe(20);
+
+            const runsAfterSwitch = runs;
+
+            first.increment();
+
+            expect(runs).toBe(runsAfterSwitch);
+
+            second.increment();
+
+            expect(derived.getSnapshot()).toBe(21);
+
+            derived.destroy();
+        });
+
+        it('should keep the sources of the last good run when a run fails', () => {
+            const flag = new CounterNotifier({ count: 0 });
+            const source = new CounterNotifier({ count: 1 });
+            const derived = selector((get) => {
+                if (get(flag).count === 1) {
+                    throw new Error('failed run');
+                }
+
+                return get(source).count;
+            });
+
+            derived.subscribe(() => undefined);
+            flag.increment();
+            flag.setCount(0);
+            source.increment();
+
+            expect(derived.getSnapshot()).toBe(2);
+
+            derived.destroy();
+        });
+    });
+
+    describe('runs after destroy', () => {
+        it('should not start listening to a source read by a run that finishes after destroy', async () => {
+            let listeners = 0;
+
+            class TrackedNotifier extends CounterNotifier {
+                protected onFirstSubscriber (): void {
+                    listeners++;
+                }
+
+                protected onLastSubscriber (): void {
+                    listeners--;
+                }
+            }
+
+            const first = new TrackedNotifier({ count: 0 });
+            const late = new TrackedNotifier({ count: 0 });
+            let runs = 0;
+            const derived = selector(async (get) => {
+                runs++;
+                get(first);
+                await Promise.resolve();
+
+                return get(late).count;
+            });
+
+            const unsubscribe = derived.subscribe(() => undefined);
+
+            unsubscribe();
+            await Promise.resolve();
+            await Promise.resolve();
+
+            expect(listeners).toBe(0);
+
+            late.increment();
+
+            expect(runs).toBe(1);
+        });
+    });
+
+    describe('strict mode and nesting', () => {
+        it('should settle on one subscription under StrictMode', () => {
+            const counter = new CounterNotifier({ count: 3 });
+            let runs = 0;
+            const derived = selector((get) => {
+                runs++;
+
+                return get(counter).count;
+            });
+            const useDerived = derived.createStateHook();
+            const { result, rerender } = renderHook(() => useDerived(), { wrapper: StrictMode });
+
+            const runsAfterMount = runs;
+
+            rerender();
+
+            expect(result.current).toBe(3);
+            expect(runs).toBe(runsAfterMount);
+
+            act(() => {
+                counter.increment();
+            });
+
+            expect(result.current).toBe(4);
+
+            derived.destroy();
+        });
+
+        it('should keep a nested selector alive for its own hook when the parent stops reading it', () => {
+            const flag = new CounterNotifier({ count: 0 });
+            const counter = new CounterNotifier({ count: 1 });
+            const inner = selector((get) => get(counter).count * 10);
+            const outer = selector((get) => (get(flag).count === 0 ? get(inner) : -1));
+            const useInner = inner.createStateHook();
+            const { result } = renderHook(() => useInner());
+
+            outer.subscribe(() => undefined);
+            flag.increment();
+
+            act(() => {
+                counter.increment();
+            });
+
+            expect(result.current).toBe(20);
+
+            outer.destroy();
+            inner.destroy();
+        });
+    });
+
+    describe('types', () => {
+        type Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends (<T>() => T extends B ? 1 : 2) ? true : false;
+
+        it('should type an async selector as possibly undefined until it resolves', () => {
+            const counter = new CounterNotifier({ count: 0 });
+            const asyncDerived = selector(async (get) => get(counter).count);
+            const syncDerived = selector((get) => get(counter).count);
+
+            const asyncIsOptional: Equal<ReturnType<typeof asyncDerived.getSnapshot>, number | undefined> = true;
+            const explicitAsync = selector<number>(async (get) => get(counter).count);
+            const explicitAsyncIsOptional: Equal<ReturnType<typeof explicitAsync.getSnapshot>, number | undefined> = true;
+
+            explicitAsync.destroy();
+            expect(explicitAsyncIsOptional).toBe(true);
+            const syncIsExact: Equal<ReturnType<typeof syncDerived.getSnapshot>, number> = true;
+
+            type Target = { kind: 'a'; value: number } | { kind: 'b' };
+
+            const unionDerived = selector<Target>((get) => (get(counter).count > 0 ? { kind: 'a', value: 1 } : { kind: 'b' }));
+            const unionStaysOneSelector: Equal<ReturnType<typeof unionDerived.getSnapshot>, Target> = true;
+
+            expect(asyncIsOptional && syncIsExact && unionStaysOneSelector).toBe(true);
+
+            unionDerived.destroy();
+
+            asyncDerived.destroy();
+            syncDerived.destroy();
+        });
+    });
+
     describe('set function', () => {
         it('should allow setting notifier state', () => {
             const counter = new CounterNotifier({ count: 0 });
@@ -200,9 +561,11 @@ describe('selector', () => {
                 return count;
             });
 
+            derived.subscribe(() => undefined);
             counter.setCount(15);
 
             expect(counter.getCount()).toBe(10);
+            expect(derived.getSnapshot()).toBe(10);
 
             derived.destroy();
         });

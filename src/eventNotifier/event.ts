@@ -14,7 +14,7 @@ export class EventNotifier<State extends object, EventType extends Record<string
 
     constructor (initialState: State) {
         super(initialState);
-        this.#subject = new EventSubject<EventType>();
+        this.#subject = new EventSubject<EventType>((error) => this.onError(error));
     }
 
     public on <Event extends keyof EventType> (event: Event, callback: (data: EventType[Event]) => void): Unsubscribe {

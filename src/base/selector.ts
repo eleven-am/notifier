@@ -1,6 +1,7 @@
-import { useRef, useSyncExternalStore } from 'react';
+import { useSyncExternalStore } from 'react';
 
 import { BaseNotifier } from './base';
+import { useSelected } from './useSelected';
 import { Subject, Subscriber, Unsubscribe } from '../subjects/subject';
 import { deepCompare } from '../utils/deepCompare';
 
@@ -9,14 +10,29 @@ export interface SelectorStatus {
     error: unknown | null;
 }
 
-type SelectorHook<State> = ReturnType<typeof selector<State>>;
 type SelectorFunc<State, ReturnType> = (state: State) => ReturnType;
 type UseNotifierHook<State> = <ReturnType = State>(selector?: SelectorFunc<State, ReturnType>) => ReturnType;
-type GetFunction = <NotifierState>(notifier: BaseNotifier<NotifierState & object> | SelectorHook<NotifierState>) => Readonly<NotifierState>;
+type Source<State> = BaseNotifier<State & object> | Selector<any, State>;
+type GetFunction = <NotifierState>(notifier: Source<NotifierState>) => Readonly<NotifierState>;
 type SetFunction = <NotifierState extends object>(notifier: BaseNotifier<NotifierState>, state: NotifierState) => void;
-type SelectorHandler<ReturnedState> = (get: GetFunction, set: SetFunction) => Promise<ReturnedState> | ReturnedState;
+type SelectorHandler<ReturnedState> = (get: GetFunction, set: SetFunction, signal: AbortSignal) => Promise<ReturnedState> | ReturnedState;
 
-function getNotifierState<T> (notifier: BaseNotifier<T & object> | SelectorHook<T>): T {
+export interface Selector<Value, State = Value> {
+    subscribe (subscriber: Subscriber<Value>): Unsubscribe;
+    subscribeStatus (subscriber: Subscriber<SelectorStatus>): Unsubscribe;
+    getStatus (): SelectorStatus;
+    getSnapshot (): State;
+    getServerSnapshot (): State;
+    createStateHook (): UseNotifierHook<State>;
+    createStatusHook (): () => SelectorStatus;
+    destroy (): void;
+}
+
+type SelectorOf<Result> = [Result] extends [Promise<infer Value>] ? Selector<Value, Value | undefined> : Selector<Result>;
+
+const identity = <State>(state: State): State => state;
+
+function getNotifierState<T> (notifier: Source<T>): T {
     if (notifier instanceof BaseNotifier) {
         return (notifier as unknown as { state: T }).state;
     }
@@ -24,7 +40,7 @@ function getNotifierState<T> (notifier: BaseNotifier<T & object> | SelectorHook<
     return notifier.getSnapshot();
 }
 
-function getNotifierServerState<T> (notifier: BaseNotifier<T & object> | SelectorHook<T>): T {
+function getNotifierServerState<T> (notifier: Source<T>): T {
     if (notifier instanceof BaseNotifier) {
         return (notifier as unknown as { serverState: T }).serverState;
     }
@@ -36,17 +52,30 @@ function setNotifierState<T extends object> (notifier: BaseNotifier<T>, state: T
     (notifier as unknown as { state: T }).state = state;
 }
 
-export function selector<ReturnedState> (selectorFn: SelectorHandler<ReturnedState>) {
-    const notifiers = new Set<BaseNotifier<any> | SelectorHook<any>>();
-    const unsubscribes: Unsubscribe[] = [];
+/**
+ * Derives state from notifiers and other selectors. Sources read through `get` are tracked
+ * per run; the selector starts on first use, recomputes when a source changes, stops listening
+ * to sources it no longer reads, and releases its sources when its last subscriber leaves.
+ * An async selector receives an AbortSignal that is aborted when a newer run starts or the
+ * selector is destroyed, and its value is undefined until the first run resolves.
+ */
+export function selector<Result> (selectorFn: (get: GetFunction, set: SetFunction, signal: AbortSignal) => Result): SelectorOf<Result>;
+export function selector<ReturnedState> (selectorFn: (get: GetFunction, set: SetFunction, signal: AbortSignal) => Promise<ReturnedState>): Selector<ReturnedState, ReturnedState | undefined>;
+export function selector<ReturnedState> (selectorFn: SelectorHandler<ReturnedState>): Selector<ReturnedState, ReturnedState | undefined> {
+    type State = ReturnedState | undefined;
+
+    const sources = new Map<Source<any>, Unsubscribe>();
     const subject = new Subject<ReturnedState>();
     const statusSubject = new Subject<SelectorStatus>();
 
-    let version = 0;
     let subscriberCount = 0;
-    let needsInit = false;
-    let returnedState: ReturnedState;
-    let serverState: ReturnedState;
+    let needsInit = true;
+    let serverReady = false;
+    let run: AbortController | null = null;
+    let inFlight: AbortController | null = null;
+    let serverRun: object | null = null;
+    let returnedState: State;
+    let serverState: State;
     let status: SelectorStatus = Object.freeze({
         pending: false,
         error: null,
@@ -65,116 +94,142 @@ export function selector<ReturnedState> (selectorFn: SelectorHandler<ReturnedSta
         statusSubject.publish(status);
     }
 
-    function handleAsyncResult (promise: Promise<ReturnedState>, currentVersion: number, isServer: boolean): void {
-        if (!isServer) {
-            setStatus({
-                pending: true,
-                error: null,
-            });
-        }
-
-        promise
-            .then((state) => {
-                if (version !== currentVersion) {
-                    return;
-                }
-
-                if (isServer) {
-                    serverState = state;
-                } else {
-                    setStatus({
-                        pending: false,
-                        error: null,
-                    });
-
-                    if (!deepCompare(returnedState, state)) {
-                        returnedState = state;
-                        subject.publish(state);
-                    }
-                }
-            })
-            .catch((error: unknown) => {
-                if (!isServer && version === currentVersion) {
-                    setStatus({
-                        pending: false,
-                        error,
-                    });
-                }
-            });
-    }
-
-    function subscribeToNotifier (notifier: BaseNotifier<any> | SelectorHook<any>): void {
-        if (notifiers.has(notifier)) {
+    function onSourceChange (): void {
+        if (needsInit) {
             return;
         }
 
-        notifiers.add(notifier);
+        compute(); // eslint-disable-line @typescript-eslint/no-use-before-define
+    }
 
-        const unsubscribe = notifier.subscribe(() => {
-            version++;
-            const currentVersion = version;
+    function track (source: Source<any>): void {
+        if (!sources.has(source)) {
+            sources.set(source, source.subscribe(onSourceChange));
+        }
+    }
 
-            const result = selectorFn(get, set); // eslint-disable-line @typescript-eslint/no-use-before-define
-
-            if (result instanceof Promise) {
-                handleAsyncResult(result, currentVersion, false);
-            } else {
-                setStatus({
-                    pending: false,
-                    error: null,
-                });
-
-                if (!deepCompare(returnedState, result)) {
-                    returnedState = result;
-                    subject.publish(result);
-                }
+    function prune (reads: Set<Source<any>>): void {
+        sources.forEach((unsubscribe, source) => {
+            if (!reads.has(source)) {
+                sources.delete(source);
+                unsubscribe();
             }
         });
-
-        unsubscribes.push(unsubscribe);
     }
 
-    function get<NotifierState> (notifier: BaseNotifier<NotifierState & object> | SelectorHook<NotifierState>): Readonly<NotifierState> {
-        subscribeToNotifier(notifier);
-
-        return getNotifierState(notifier);
-    }
-
-    function getServer<NotifierState> (notifier: BaseNotifier<NotifierState & object> | SelectorHook<NotifierState>): Readonly<NotifierState> {
-        subscribeToNotifier(notifier);
-
-        return getNotifierServerState(notifier);
-    }
-
-    function initialiseValues (): void {
-        const currentVersion = version;
-        const serverResult = selectorFn(getServer, set);
-        const clientResult = selectorFn(get, set);
-
-        if (serverResult instanceof Promise) {
-            handleAsyncResult(serverResult, currentVersion, true);
-        } else {
-            serverState = serverResult;
-        }
-
-        if (clientResult instanceof Promise) {
-            handleAsyncResult(clientResult, currentVersion, false);
-        } else {
-            returnedState = clientResult;
-            subject.publish(clientResult);
-        }
-    }
-
-    function destroy (): void {
-        version++;
-        unsubscribes.forEach((unsubscribe) => unsubscribe());
-        unsubscribes.length = 0;
-        notifiers.clear();
-        needsInit = true;
+    function settle (state: ReturnedState, reads: Set<Source<any>>): void {
         setStatus({
             pending: false,
             error: null,
         });
+        prune(reads);
+
+        if (!deepCompare(returnedState, state)) {
+            returnedState = state;
+            subject.publish(state);
+        }
+    }
+
+    function fail (error: unknown): void {
+        setStatus({
+            pending: false,
+            error,
+        });
+    }
+
+    function abortInFlight (): void {
+        inFlight?.abort();
+        inFlight = null;
+    }
+
+    function compute (): void {
+        abortInFlight();
+
+        const current = new AbortController();
+        const reads = new Set<Source<any>>();
+        const get: GetFunction = (source) => {
+            if (run === current) {
+                reads.add(source);
+                track(source);
+            }
+
+            return getNotifierState(source);
+        };
+
+        run = current;
+
+        let result: Promise<ReturnedState> | ReturnedState;
+
+        try {
+            result = selectorFn(get, set, current.signal);
+        } catch (error) {
+            if (run === current) {
+                fail(error);
+            }
+
+            return;
+        }
+
+        if (run !== current) {
+            return;
+        }
+
+        if (!(result instanceof Promise)) {
+            settle(result, reads);
+
+            return;
+        }
+
+        inFlight = current;
+        setStatus({
+            pending: true,
+            error: null,
+        });
+
+        result.then(
+            (state) => {
+                if (run === current) {
+                    inFlight = null;
+                    settle(state, reads);
+                }
+            },
+            (error: unknown) => {
+                if (run === current) {
+                    inFlight = null;
+                    fail(error);
+                }
+            },
+        );
+    }
+
+    function computeServer (): void {
+        const current = {};
+        const get: GetFunction = (source) => getNotifierServerState(source);
+
+        serverRun = current;
+
+        let result: Promise<ReturnedState> | ReturnedState;
+
+        try {
+            result = selectorFn(get, set, new AbortController().signal);
+        } catch {
+            return;
+        }
+
+        if (!(result instanceof Promise)) {
+            serverState = result;
+
+            return;
+        }
+
+        result.then(
+            (state) => {
+                if (serverRun === current) {
+                    serverState = state;
+                }
+            },
+            () => undefined,
+        );
     }
 
     function ensureInitialised (): void {
@@ -182,8 +237,22 @@ export function selector<ReturnedState> (selectorFn: SelectorHandler<ReturnedSta
             return;
         }
 
-        initialiseValues();
         needsInit = false;
+        compute();
+    }
+
+    function destroy (): void {
+        abortInFlight();
+        run = null;
+        serverRun = null;
+        sources.forEach((unsubscribe) => unsubscribe());
+        sources.clear();
+        needsInit = true;
+        serverReady = false;
+        setStatus({
+            pending: false,
+            error: null,
+        });
     }
 
     function retain (): void {
@@ -225,64 +294,46 @@ export function selector<ReturnedState> (selectorFn: SelectorHandler<ReturnedSta
         };
     }
 
-    const subscribeToStatus = (callback: () => void): Unsubscribe => subscribeStatus(() => callback());
-    const getStatus = (): SelectorStatus => status;
+    function getSnapshot (): State {
+        ensureInitialised();
 
-    initialiseValues();
+        return returnedState;
+    }
+
+    function getServerSnapshot (): State {
+        if (!serverReady) {
+            serverReady = true;
+            computeServer();
+        }
+
+        return serverState;
+    }
+
+    function getStatus (): SelectorStatus {
+        ensureInitialised();
+
+        return status;
+    }
+
+    const subscribeToResult = (callback: () => void): Unsubscribe => subscribeResult(() => callback());
+    const subscribeToStatus = (callback: () => void): Unsubscribe => subscribeStatus(() => callback());
+
+    function useSelectorState<Selected = State> (selectFn?: SelectorFunc<State, Selected>): Selected {
+        return useSelected(subscribeToResult, getSnapshot, getServerSnapshot, selectFn ?? (identity as SelectorFunc<State, Selected>));
+    }
+
+    function useSelectorStatus (): SelectorStatus {
+        return useSyncExternalStore(subscribeToStatus, getStatus, getStatus);
+    }
 
     return {
         subscribe: subscribeResult,
         subscribeStatus,
         getStatus,
-        getServerSnapshot: () => {
-            ensureInitialised();
-
-            return serverState;
-        },
-        getSnapshot: () => {
-            ensureInitialised();
-
-            return returnedState;
-        },
-        createStateHook: (): UseNotifierHook<ReturnedState> => <ReturnType>(selectorFunc?: SelectorFunc<ReturnedState, ReturnType>): ReturnType => {
-            const deriveClient = (fn?: SelectorFunc<ReturnedState, ReturnType>): ReturnType => {
-                ensureInitialised();
-
-                return fn ? fn(returnedState) : returnedState as unknown as ReturnType;
-            };
-
-            const selectorFuncRef = useRef(selectorFunc);
-            const clientStateRef = useRef(deriveClient(selectorFunc));
-            const serverStateRef = useRef(
-                selectorFunc
-                    ? selectorFunc(serverState)
-                    : serverState as unknown as ReturnType,
-            );
-
-            if (selectorFuncRef.current !== selectorFunc) {
-                selectorFuncRef.current = selectorFunc;
-                clientStateRef.current = deriveClient(selectorFunc);
-                serverStateRef.current = selectorFunc
-                    ? selectorFunc(serverState)
-                    : serverState as unknown as ReturnType;
-            }
-
-            const subscribe = (callback: () => void) => subscribeResult(() => callback());
-
-            const getSnapshot = () => {
-                const next = deriveClient(selectorFuncRef.current);
-
-                if (!deepCompare(clientStateRef.current, next)) {
-                    clientStateRef.current = next;
-                }
-
-                return clientStateRef.current;
-            };
-            const getServerSnapshot = () => serverStateRef.current;
-
-            return useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
-        },
-        createStatusHook: () => () => useSyncExternalStore(subscribeToStatus, getStatus, getStatus),
+        getSnapshot,
+        getServerSnapshot,
+        createStateHook: () => useSelectorState,
+        createStatusHook: () => useSelectorStatus,
         destroy,
     };
 }

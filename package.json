@@ -1,6 +1,6 @@
 {
   "name": "@eleven-am/notifier",
-  "version": "0.0.77",
+  "version": "0.1.0",
   "description": "Type-safe state management for React with class-based architecture, selectors, and event handling",
   "scripts": {
     "clean": "rimraf dist",

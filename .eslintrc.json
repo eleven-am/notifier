@@ -383,5 +383,13 @@
     "wrap-regex": "error",
     "yield-star-spacing": "error",
     "yoda": "error"
-  }
+  },
+  "overrides": [
+    {
+      "files": ["src/base/base.ts"],
+      "rules": {
+        "no-empty-function": ["warn", { "allow": ["methods"] }]
+      }
+    }
+  ]
 }

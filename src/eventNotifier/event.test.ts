@@ -324,4 +324,29 @@ describe('EventNotifier', () => {
             expect(eventCallback).toHaveBeenCalledWith(1);
         });
     });
+
+    describe('listener errors', () => {
+        it('should hand a throwing event listener to onError and keep notifying the others', () => {
+            const errors: unknown[] = [];
+            const failure = new Error('listener failed');
+
+            class GuardedNotifier extends TestEventNotifier {
+                protected onError (error: unknown): void {
+                    errors.push(error);
+                }
+            }
+
+            const notifier = new GuardedNotifier({ count: 0, status: 'idle' });
+            const listener = jest.fn();
+
+            notifier.on('increment', () => {
+                throw failure;
+            });
+            notifier.on('increment', listener);
+
+            expect(() => notifier.increment()).not.toThrow();
+            expect(listener).toHaveBeenCalledWith(1);
+            expect(errors).toEqual([failure]);
+        });
+    });
 });

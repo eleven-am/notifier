@@ -1,34 +1,85 @@
 # Notifier
 
-A powerful and type-safe state management solution for React applications, featuring class-based state management, selectors, and event handling.
+State management for React built on plain TypeScript classes.
+
+You write a class that holds some state and the methods that change it. Notifier
+turns that class into React hooks: one hook to read the state, one to call the
+methods. On top of that you get selectors (values computed from other state, sync
+or async) and typed events.
 
 [![npm version](https://badge.fury.io/js/%40eleven-am%2Fnotifier.svg)](https://www.npmjs.com/package/@eleven-am/notifier)
 ![License](https://img.shields.io/github/license/eleven-am/notifier)
-
-## Features
-
-- 🎯 **Type-safe**: Full TypeScript support with precise type inference
-- 🏗️ **Class-based Architecture**: Clean and organized state management
-- 🔄 **Selectors**: Compute derived state with memoization
-- 📡 **Event System**: Built-in pub/sub pattern for component communication
-- 🎣 **Custom Hooks**: Generate specialized hooks for state, actions, and events
-- 🏭 **Factory Pattern**: Create local state instances from global notifiers
-- 🔒 **Encapsulation**: Protected state access with controlled updates
-- 🔌 **Resource Lifecycle**: Start and stop external resources with the first and last subscriber
-
-## Installation
 
 ```bash
 npm install @eleven-am/notifier
 ```
 
-## Basic Usage
+Requires React 18 or 19.
 
-### 1. Create a Notifier
+## Contents
 
-```typescript
+- [The four building blocks](#the-four-building-blocks)
+- [Quick start](#quick-start)
+- [Notifiers](#notifiers)
+- [Reading state in components](#reading-state-in-components)
+- [Calling methods from components](#calling-methods-from-components)
+- [Using a notifier outside React](#using-a-notifier-outside-react)
+- [Local state per component](#local-state-per-component)
+- [Selectors](#selectors)
+- [Async selectors](#async-selectors)
+- [Events](#events)
+- [Starting and stopping resources](#starting-and-stopping-resources)
+- [Errors](#errors)
+- [Server rendering](#server-rendering)
+- [API reference](#api-reference)
+- [Rules to remember](#rules-to-remember)
+- [Upgrading to 0.1](#upgrading-to-01)
+
+## The four building blocks
+
+| You want to… | Use | You get |
+| --- | --- | --- |
+| Keep shared state and the logic that changes it | `Notifier` | a state hook and an actions hook |
+| Give every component its own copy of that state | `Notifier.createFactoryHook` | a hook that creates one instance per component |
+| Compute a value from one or more notifiers, or load data based on them | `selector` | a hook for the value and a hook for its loading/error status |
+| Broadcast one-off messages ("message received", "typing") | `EventNotifier` | everything a notifier has, plus typed events |
+
+## Quick start
+
+```tsx
 import { Notifier } from '@eleven-am/notifier';
 
+interface CounterState {
+  count: number;
+}
+
+class CounterNotifier extends Notifier<CounterState> {
+  increment() {
+    this.updateState({ count: this.state.count + 1 });
+  }
+}
+
+const counter = new CounterNotifier({ count: 0 });
+
+export const useCounter = counter.createStateHook();
+export const useCounterActions = counter.createActionsHook();
+
+function Counter() {
+  const count = useCounter((state) => state.count);
+  const { increment } = useCounterActions();
+
+  return <button onClick={increment}>Clicked {count} times</button>;
+}
+```
+
+Every component that calls `useCounter` sees the same count, and re-renders when
+it changes.
+
+## Notifiers
+
+A notifier is a class that extends `Notifier<State>`.
+
+```ts
 interface UserState {
   name: string;
   age: number;
@@ -39,200 +90,226 @@ class UserNotifier extends Notifier<UserState> {
     this.updateState({ name });
   }
 
-  setAge(age: number) {
-    this.updateState({ age });
+  async load(id: string) {
+    const user = await api.getUser(id);
+    this.updateState(user);
   }
 }
 
-// Initialize with default state
-const userNotifier = new UserNotifier({
-  name: 'John Doe',
-  age: 25
-});
+export const userNotifier = new UserNotifier({ name: '', age: 0 });
 ```
 
-### 2. Create and Use Hooks
+- **State is an object.** The constructor throws for anything else (a number,
+  an array, `null`).
+- **`this.state`** reads the current state. It is `protected`: only the class
+  itself can read or write it, so all changes go through your methods.
+- **`this.updateState(partial)`** merges the fields you pass into the current
+  state (a shallow merge) and notifies everyone listening.
+- **`this.state = next`** replaces the whole state and notifies everyone.
+- **State is immutable.** Always pass new objects and arrays. If you mutate the
+  current object in place, listeners are not told anything changed.
+- **Methods can be async.** Call `updateState` whenever you have data; there is
+  nothing special to set up.
 
-```typescript
-// Create hooks for global state management
+## Reading state in components
+
+`createStateHook()` returns a hook. Call it with a function that picks what the
+component needs:
+
+```tsx
 const useUser = userNotifier.createStateHook();
+
+function Greeting() {
+  const name = useUser((state) => state.name);
+  return <p>Hello {name}</p>;
+}
+
+function Profile() {
+  const { name, age } = useUser((state) => ({ name: state.name, age: state.age }));
+  return <p>{name}, {age}</p>;
+}
+
+function Everything() {
+  const user = useUser();
+  return <pre>{JSON.stringify(user)}</pre>;
+}
+```
+
+The component re-renders only when the value your function returns actually
+changes. Values are compared by content, not by reference: arrays, plain objects,
+Maps, Sets, Dates and RegExps are compared deeply. So a function that builds a new
+object every time, like `Profile` above, is fine: the component keeps getting the
+same object until something in it changes, which also keeps it safe to use in
+`useEffect` and `useMemo` dependencies.
+
+## Calling methods from components
+
+`createActionsHook()` returns a hook that gives you the notifier's public methods,
+already bound, so you can pass them around directly:
+
+```tsx
 const useUserActions = userNotifier.createActionsHook();
 
-// Use in components
-function UserProfile() {
-  // Optional transform function
-  const { name, age } = useUser(state => ({
-    name: state.name.toUpperCase(),
-    age: state.age
-  }));
-  
-  const { setName, setAge } = useUserActions();
-
-  return (
-    <div>
-      <input 
-        value={name}
-        onChange={e => setName(e.target.value)}
-      />
-      <input 
-        type="number"
-        value={age}
-        onChange={e => setAge(Number(e.target.value))}
-      />
-    </div>
-  );
+function NameInput() {
+  const { setName } = useUserActions();
+  return <input onChange={(event) => setName(event.target.value)} />;
 }
 ```
 
-## Advanced Features
+- The object is the same on every render, so it is safe in dependency arrays.
+- It contains your public methods only. Methods whose name starts with `_`,
+  getters and setters, and the built-in methods (`subscribe`, `reset`,
+  `createStateHook`, `updateState`, the lifecycle hooks, `onError`) are left out.
+- The actions hook never causes a re-render.
 
-### Factory Pattern
+## Using a notifier outside React
 
-The factory pattern allows you to create local instances of a notifier, enabling component-specific state management instead of global state. This is particularly useful when you need multiple independent instances of the same state structure:
+A notifier is a plain object, so you can use it anywhere:
 
-```typescript
-// Create a factory hook with initial state
-const useUserFactory = UserNotifier.createFactoryHook({
-  name: 'John Doe',
-  age: 25
+```ts
+const unsubscribe = userNotifier.subscribe((state) => {
+  console.log('user changed', state);
 });
 
-// Use in components for local state management
-function UserCard() {
-  // Each component gets its own instance of the state
-  const { state, actions } = useUserFactory();
-  const { name, age } = state;
-  
-  return (
-    <div>
-      <h2>{name}</h2>
-      <p>Age: {age}</p>
-      <button onClick={() => actions.setAge(age + 1)}>
-        Birthday
-      </button>
-    </div>
-  );
-}
+userNotifier.setName('Ada');
 
-// Multiple instances with independent state
-function UserList() {
-  return (
-    <div>
-      <UserCard /> {/* Has its own state */}
-      <UserCard /> {/* Has different independent state */}
-      <UserCard /> {/* Has different independent state */}
-    </div>
-  );
-}
+unsubscribe();
 ```
 
-The key differences between global and local state management:
+- `subscribe(listener)` calls `listener` with the new state after every change and
+  returns an unsubscribe function (safe to call more than once).
+- `getSnapshot(notifierOrSelector)` returns the current value of any notifier or
+  selector:
 
-```typescript
-// Global State (shared across all components)
-const globalUserNotifier = new UserNotifier({ name: 'John', age: 25 });
-const useGlobalUser = globalUserNotifier.createStateHook();
+  ```ts
+  import { getSnapshot } from '@eleven-am/notifier';
 
-// Local State (independent for each component)
-const useLocalUser = UserNotifier.createFactoryHook({ name: 'John', age: 25 });
+  const { name } = getSnapshot(userNotifier);
+  ```
 
-function App() {
-  // These components share the same state
-  return (
-    <>
-      <GlobalUserComponent />
-      <GlobalUserComponent /> {/* Updates reflect in both components */}
-    </>
-  );
+- `reset()` puts the state back to the value the notifier was created with.
+
+## Local state per component
+
+A normal notifier is shared: every component sees the same state. When each
+component needs its own copy, for example one per card in a list, use a factory
+hook:
+
+```tsx
+const useCard = UserNotifier.createFactoryHook({ name: 'New card', age: 0 });
+
+function Card() {
+  const { state, actions } = useCard((state) => state.name);
+
+  return <input value={state} onChange={(event) => actions.setName(event.target.value)} />;
 }
 
-function LocalStateApp() {
-  // These components have independent states
+function Cards() {
   return (
     <>
-      <LocalUserComponent /> {/* Independent state */}
-      <LocalUserComponent /> {/* Different independent state */}
+      <Card />
+      <Card />
     </>
   );
 }
 ```
 
-### Selectors
+Each `Card` gets its own `UserNotifier`, created when the component mounts and
+kept for as long as it stays mounted. The arguments you pass to
+`createFactoryHook` are used for every instance and are fixed when you create the
+hook. If the arguments need to change, create instances yourself with
+`UserNotifier.build(...)` and keep them where you need them.
 
-Create computed state derived from one or more notifiers:
+## Selectors
 
-```typescript
+A selector computes a value from one or more notifiers (or other selectors). Read
+sources with `get`:
+
+```tsx
 import { selector } from '@eleven-am/notifier';
 
-const userDetailsSelector = selector((get, set) => {
-  const user = get(userNotifier);
-  const preferences = get(preferencesNotifier);
-  
-  return {
-    fullName: `${user.name} (${preferences.nickname})`,
-    isAdult: user.age >= 18
-  };
+const cartTotal = selector((get) => {
+  const { items } = get(cartNotifier);
+  const { rate } = get(taxNotifier);
+  const subtotal = items.reduce((sum, item) => sum + item.price * item.quantity, 0);
+
+  return { subtotal, total: subtotal * (1 + rate) };
 });
 
-// Create hook for the selector
-const useUserDetails = userDetailsSelector.createStateHook();
+export const useCartTotal = cartTotal.createStateHook();
+
+function Total() {
+  const total = useCartTotal((value) => value.total);
+  return <p>{total.toFixed(2)}</p>;
+}
 ```
 
-Async selectors also expose their current execution status without replacing the
-last successful value when a later calculation fails:
+How a selector behaves:
 
-```typescript
-const searchResults = selector(async (get) => {
+- **It starts when first used**, the first time a component, a subscriber or
+  `getSnapshot` reads it, not when you create it.
+- **It recomputes when a source it read changes.** Sources are whatever you passed
+  to `get` during the last run. If a later run stops reading a source (for example
+  behind an `if`), changes to that source no longer trigger it.
+- **It only notifies when the result changes.** Results are compared by content,
+  the same way as the state hook.
+- **It stops when nobody uses it.** When the last subscriber leaves, it releases
+  its sources, and it starts again the next time it is read.
+- **Selectors can read other selectors**: `get(cartTotal)` works inside another
+  selector.
+- **It can write to a notifier** with its second argument, `set(notifier, state)`,
+  which replaces that notifier's state. Use this sparingly; methods on the
+  notifier are usually clearer.
+
+The selector object also works outside React: `subscribe(listener)`,
+`getSnapshot()`, `getStatus()`, `subscribeStatus(listener)` and `destroy()`.
+
+## Async selectors
+
+Make the function `async` to load data from the current state. The third argument
+is an `AbortSignal`:
+
+```tsx
+const searchResults = selector(async (get, set, signal) => {
   const { query } = get(searchNotifier);
-  return api.search(query);
+  const response = await fetch(`/api/search?q=${encodeURIComponent(query)}`, { signal });
+
+  return response.json() as Promise<SearchResult[]>;
 });
 
 const useSearchResults = searchResults.createStateHook();
 const useSearchStatus = searchResults.createStatusHook();
 
-function SearchResults() {
+function Search() {
   const results = useSearchResults();
   const { pending, error } = useSearchStatus();
 
-  if (pending && !results) return <p>Searching…</p>;
-  if (error) return <p>The latest search failed.</p>;
+  if (error) return <p>Search failed.</p>;
+  if (!results) return <p>Searching…</p>;
 
-  return <Results items={results} />;
+  return <ResultList items={results} pending={pending} />;
 }
 ```
 
-For non-React consumers, use `subscribeStatus()` and `getStatus()`. When no
-result or status subscribers remain, the selector releases its upstream
-subscriptions and reconnects automatically when it is used again.
+- **The value starts as `undefined`** and stays that way until the first run
+  finishes. The type says so: `useSearchResults()` returns
+  `SearchResult[] | undefined`. Plain `subscribe` listeners only ever receive
+  finished results.
+- **Only the newest run counts.** If the query changes while a request is still
+  running, that request's `signal` is aborted and its result is ignored. Passing
+  `signal` to `fetch` cancels the request itself.
+- **Status:** `createStatusHook()` (or `getStatus()`) returns
+  `{ pending, error }`. `pending` is `true` while a run is in progress.
+- **A failed run keeps the last good value.** `error` is set, the previous result
+  stays on screen, and the next successful run clears the error. The same applies
+  to a sync selector that throws.
 
-### Subscriber Lifecycle
+## Events
 
-Notifiers that own an external resource can start it when the first direct or
-React subscriber arrives and stop it after the last subscriber leaves:
+`EventNotifier` is a notifier that can also send typed, one-off messages. Use it
+for things that happen, as opposed to things that are:
 
-```typescript
-class ConnectionNotifier extends Notifier<ConnectionState> {
-  private socket?: WebSocket;
-
-  protected onFirstSubscriber() {
-    this.socket = new WebSocket('/events');
-  }
-
-  protected onLastSubscriber() {
-    this.socket?.close();
-    this.socket = undefined;
-  }
-}
-```
-
-Each hook mount and direct `subscribe()` call participates in the same lifecycle.
-The returned unsubscribe function is safe to call more than once.
-
-### Event Notifier
-
-Handle pub/sub events between components:
-
-```typescript
+```tsx
 import { EventNotifier } from '@eleven-am/notifier';
 
 interface ChatState {
@@ -245,236 +322,175 @@ interface ChatEvents {
 }
 
 class ChatNotifier extends EventNotifier<ChatState, ChatEvents> {
-  addMessage(message: string) {
-    this.updateState({
-      messages: [...this.state.messages, message]
-    });
+  receive(message: string) {
+    this.updateState({ messages: [...this.state.messages, message] });
     this.emit('messageReceived', message);
   }
 
-  setTyping(userId: string) {
+  typing(userId: string) {
     this.emit('typing', { userId });
   }
 }
 
-// In components
-function ChatRoom() {
-  const { on } = useChatActions();
-  
-  // Method 1: Using the events hook
-  useChatEvents('messageReceived', (message) => {
-    console.log('New message:', message);
-  });
-  
-  // Method 2: Using direct subscription
-  useEffect(() => {
-    const unsubscribe = on('typing', ({ userId }) => {
-      console.log(`${userId} is typing...`);
-    });
-    
-    return unsubscribe;
-  }, [on]);
+const chat = new ChatNotifier({ messages: [] });
+const useChatEvents = chat.createEventsHook();
+
+function TypingIndicator() {
+  const [typing, setTyping] = useState<string | null>(null);
+
+  useChatEvents('typing', ({ userId }) => setTyping(userId));
+
+  return typing ? <p>{typing} is typing…</p> : null;
 }
 ```
 
-Events are transient, in-memory notifications. A new subscriber receives only
-events emitted after it subscribes; persistent application data belongs in the
-notifier state (or another durable store). Event subscriptions use the same
-idempotent cleanup behavior as normal state subscriptions.
+- `this.emit(event, payload)` sends an event; it is `protected`, so only the
+  class can send.
+- `createEventsHook()` gives a hook that listens while the component is mounted.
+  The callback can change between renders without resubscribing.
+- `notifier.on(event, callback)` listens outside React and returns an unsubscribe
+  function.
+- Events are not stored. A listener only receives events sent after it started
+  listening. Anything a component needs to show later belongs in state.
 
-## Type Definitions
+## Starting and stopping resources
 
-Key types for advanced usage:
+Override `onFirstSubscriber` and `onLastSubscriber` to open a resource only while
+someone is using the notifier:
 
-```typescript
-// Selector function type
-type SelectorFunc<State, ReturnType> = (state: State) => ReturnType;
+```ts
+class LivePricesNotifier extends Notifier<PricesState> {
+  private socket?: WebSocket;
 
-// Hook for accessing notifier state
-type UseNotifierHook<State> = <ReturnType = State>(
-  selector?: SelectorFunc<State, ReturnType>
-) => ReturnType;
-
-// Hook for accessing notifier methods
-type UseActorsHook<Class extends Notifier<any>> = () => 
-  PublicMethods<Class>;
-
-// Event subscription callback
-type Observer<Data> = (data: Data) => void;
-
-// Event hook type
-type UseEventHook<EventType> = <Event extends keyof EventType>(
-  event: Event, 
-  callback: (data: EventType[Event]) => void
-) => void;
-```
-
-## Why Class-Based State Management?
-
-The Notifier package leverages classes for state management, providing several key advantages over traditional object-based approaches:
-
-### 1. Inheritance and Extension
-```typescript
-// Base authentication notifier with common functionality
-class AuthNotifier extends Notifier<AuthState> {
-  login(credentials: Credentials) {
-    // Common login logic
+  protected onFirstSubscriber() {
+    this.socket = new WebSocket('/prices');
+    this.socket.onmessage = (event) => this.updateState(JSON.parse(event.data));
   }
-  
-  logout() {
-    // Common logout logic
-  }
-}
 
-// Specialized authentication for different providers
-class OAuth2Notifier extends AuthNotifier {
-  login(credentials: OAuth2Credentials) {
-    // OAuth2 specific logic
-    super.login(credentials);
-    this.handleTokenRefresh();
-  }
-  
-  private handleTokenRefresh() {
-    // Token refresh logic
-  }
-}
-
-class BasicAuthNotifier extends AuthNotifier {
-  login(credentials: BasicAuthCredentials) {
-    // Basic auth specific logic
-    super.login(credentials);
+  protected onLastSubscriber() {
+    this.socket?.close();
+    this.socket = undefined;
   }
 }
 ```
 
-### 2. Encapsulation and Privacy
-```typescript
+Every mounted component using the state hook and every `subscribe()` call counts
+as a subscriber. Re-renders do not.
+
+## Errors
+
+A listener that throws cannot break anything else: the method that changed the
+state still completes, and every other listener still gets the update. The error
+goes to `onError`, which logs it with `console.error` by default. Override it to
+send errors somewhere else:
+
+```ts
+class CartNotifier extends Notifier<CartState> {
+  protected onError(error: unknown) {
+    monitoring.report(error);
+  }
+}
+```
+
+This covers state listeners and event listeners. Errors inside selectors are
+reported through the selector's status instead (see
+[Async selectors](#async-selectors)).
+
+## Server rendering
+
+When the server renders with data the client must start from, set it once in the
+notifier with the protected `serverState` setter:
+
+```ts
 class UserNotifier extends Notifier<UserState> {
-  private validateAge(age: number) {
-    if (age < 0 || age > 150) {
-      throw new Error('Invalid age');
-    }
-  }
-
-  setAge(age: number) {
-    this.validateAge(age);
-    this.updateState({ age });
-  }
-  
-  // State can only be modified through defined methods
-  // No direct external state manipulation possible
-}
-```
-
-### 3. Method Organization and Code Structure
-```typescript
-class ShoppingCartNotifier extends Notifier<CartState> {
-  // Clear grouping of related functionality
-  // Cart Items Management
-  addItem(item: Product) { /* ... */ }
-  removeItem(itemId: string) { /* ... */ }
-  updateQuantity(itemId: string, quantity: number) { /* ... */ }
-  
-  // Cart Totals
-  calculateSubtotal() { /* ... */ }
-  calculateTax() { /* ... */ }
-  calculateTotal() { /* ... */ }
-  
-  // Checkout Process
-  beginCheckout() { /* ... */ }
-  applyDiscount(code: string) { /* ... */ }
-  completeTransaction() { /* ... */ }
-}
-```
-
-### 4. Type Safety and Intellisense
-```typescript
-class ProductNotifier extends Notifier<ProductState> {
-  // Methods and properties are properly typed
-  // IDE provides excellent autocomplete and type checking
-  updateStock(productId: string, quantity: number) {
-    const product = this.state.products[productId];
-    if (!product) throw new Error('Product not found');
-    
-    this.updateState({
-      products: {
-        ...this.state.products,
-        [productId]: {
-          ...product,
-          stock: quantity
-        }
-      }
-    });
+  hydrate(user: UserState) {
+    this.serverState = user;
   }
 }
 ```
 
-### 5. Testing and Mocking
-```typescript
-class ApiNotifier extends Notifier<ApiState> {
-  protected api: ApiService;
-  
-  constructor(initialState: ApiState, api: ApiService) {
-    super(initialState);
-    this.api = api;
-  }
-  
-  async fetchData() {
-    const data = await this.api.getData();
-    this.updateState({ data });
-  }
-}
+The first value set becomes both the server snapshot used during hydration and
+the current state; later calls are ignored. Without it, the server snapshot is the
+initial state.
 
-// Easy to test with mock services
-describe('ApiNotifier', () => {
-  it('should fetch and update data', async () => {
-    const mockApi = new MockApiService();
-    const notifier = new ApiNotifier(initialState, mockApi);
-    let currentData;
-    const unsubscribe = notifier.subscribe((state) => {
-      currentData = state.data;
-    });
+## API reference
 
-    await notifier.fetchData();
+### `Notifier<State>`
 
-    expect(currentData).toEqual(expectedData);
-    unsubscribe();
-  });
-});
-```
+| Member | Who uses it | What it does |
+| --- | --- | --- |
+| `new MyNotifier(initialState)` | you | creates a shared instance |
+| `MyNotifier.build(...args)` | you | same as `new`, typed for subclasses |
+| `MyNotifier.createFactoryHook(...args)` | components | hook returning `{ state, actions }` for a per-component instance |
+| `createStateHook()` | components | hook: `useX()` or `useX(state => picked)` |
+| `createActionsHook()` | components | hook returning the bound public methods |
+| `subscribe(listener)` | outside React | listen to changes; returns unsubscribe |
+| `reset()` | anyone | back to the initial state |
+| `this.state` / `this.state = next` | the class | read / replace state |
+| `this.updateState(partial)` | the class | shallow-merge and notify |
+| `this.serverState = value` | the class | set the hydration state once |
+| `onFirstSubscriber()` / `onLastSubscriber()` | override | start / stop resources |
+| `onError(error)` | override | where listener errors go (default `console.error`) |
 
-### 6. Cross-Cutting Concerns
-```typescript
-class LoggingNotifier<T> extends Notifier<T> {
-  protected updateState(state: Partial<T>) {
-    console.log('State update:', state);
-    super.updateState(state);
-    console.log('New state:', this.state);
-  }
-}
+### `EventNotifier<State, Events>`
 
-// Easily add logging to any notifier
-class UserNotifier extends LoggingNotifier<UserState> {
-  // All state updates are automatically logged
-  updateProfile(profile: Partial<UserState>) {
-    this.updateState(profile);
-  }
-}
-```
+Everything in `Notifier`, plus:
 
-## Best Practices
+| Member | What it does |
+| --- | --- |
+| `this.emit(event, payload)` | send an event (class only) |
+| `on(event, callback)` | listen; returns unsubscribe |
+| `createEventsHook()` | hook: `useEvents(event, callback)` |
 
-1. **Global vs Local State**: Use regular notifier instances for global state and factory hooks for component-specific state
-2. **State Updates**: Use `updateState` method for partial updates instead of directly setting state
-3. **Event Cleanup**: Always unsubscribe from events in useEffect cleanup function
-4. **Selector Memoization**: Use selectors for computed values that depend on multiple state sources
-5. **Type Safety**: Leverage TypeScript interfaces for state and event types
-6. **Encapsulation**: Keep state modifications within the notifier class methods
-7. **Durability**: Treat events as transient signals; keep durable values in state or persistent storage
+### `selector(fn)`
 
-## Contributing
+`fn(get, set, signal)` returns a value or a promise.
 
-We welcome contributions! Please open an issue or submit a pull request on GitHub.
+| Member | What it does |
+| --- | --- |
+| `createStateHook()` | hook: `useX()` or `useX(value => picked)` |
+| `createStatusHook()` | hook returning `{ pending, error }` |
+| `subscribe(listener)` | listen to new results; returns unsubscribe |
+| `subscribeStatus(listener)` | listen to status changes |
+| `getSnapshot()` | current value (starts the selector if needed) |
+| `getStatus()` | current `{ pending, error }` |
+| `getServerSnapshot()` | value computed from the notifiers' server state |
+| `destroy()` | stop now: abort a running request, release all sources |
+
+### Other exports
+
+- `getSnapshot(notifierOrSelector)`: current value of any notifier or selector.
+- Types: `UseNotifierHook`, `UseEventHook`, `Subscriber`, `Unsubscribe`,
+  `Selector`, `SelectorStatus`, `ErrorHandler`.
+
+## Rules to remember
+
+1. Change state only inside the notifier, with `updateState` or `this.state = …`.
+2. Never mutate state in place; always create new objects and arrays.
+3. Create notifiers and hooks once, at module level, not inside components.
+4. Shared state: a notifier instance. Per-component state: `createFactoryHook`.
+5. Derived or loaded data: a selector. Pass its `signal` to `fetch`.
+6. Things that happen: events. Things that are: state.
+7. Handle the `undefined` first value of async selectors.
+
+## Upgrading to 0.1
+
+0.1.0 fixes several bugs and changes three behaviours:
+
+- **`onError` is now a built-in hook.** If one of your notifiers already has a
+  public method called `onError`, rename it: it now receives listener errors and is
+  no longer part of the actions.
+- **Async selectors are typed `T | undefined`** for their value. This was always
+  true at runtime; TypeScript now makes you handle it.
+- **Selectors start when first used**, not when created. A selector that nothing
+  reads no longer runs, so do not rely on one for side effects.
+
+Also fixed: components could miss an update that happened while they were
+mounting; a throwing listener broke the method that changed state; every
+re-render restarted selectors (async selectors refetched on each render); inline
+pick functions returned a new object every render; old async runs were never
+cancelled; selectors kept listening to sources they no longer read. Comparisons
+are about twice as fast, and the package is compiled for ES2022.
 
 ## License
 

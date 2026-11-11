@@ -1,4 +1,5 @@
 import { renderHook, act } from '@testing-library/react';
+import { useLayoutEffect } from 'react';
 
 import { BaseNotifier, UseNotifierHook } from './base';
 
@@ -148,6 +149,36 @@ describe('BaseNotifier', () => {
     });
 
     describe('subscribe', () => {
+        it('should not let a throwing subscriber break the action or the other subscribers', () => {
+            const errors: unknown[] = [];
+            const failure = new Error('subscriber failed');
+
+            class GuardedNotifier extends TestNotifier {
+                protected onError (error: unknown): void {
+                    errors.push(error);
+                }
+            }
+
+            const notifier = new GuardedNotifier({ count: 0, name: 'test' });
+            const subscriber = jest.fn();
+
+            notifier.subscribe(() => {
+                throw failure;
+            });
+            notifier.subscribe(subscriber);
+
+            expect(() => notifier.increment()).not.toThrow();
+            expect(subscriber).toHaveBeenCalledWith({ count: 1, name: 'test' });
+            expect(errors).toEqual([failure]);
+        });
+
+        it('should keep onError out of the public actions', () => {
+            const notifier = new TestNotifier({ count: 0, name: 'test' });
+            const { result } = renderHook(() => notifier.createActionsHook()());
+
+            expect((result.current as Record<string, unknown>).onError).toBeUndefined();
+        });
+
         it('should receive state updates', () => {
             const notifier = new TestNotifier({ count: 0, name: 'test' });
             const subscriber = jest.fn();
@@ -345,6 +376,95 @@ describe('BaseNotifier', () => {
             });
 
             expect(renderCount).toBe(initialRenderCount);
+        });
+
+        it('should render a change that lands between render and subscribe', () => {
+            const notifier = new TestNotifier({ count: 0, name: 'test' });
+            const useTestState = notifier.createStateHook();
+
+            const { result } = renderHook(() => {
+                const count = useTestState((s) => s.count);
+
+                useLayoutEffect(() => {
+                    notifier.increment();
+                }, []);
+
+                return count;
+            });
+
+            expect(result.current).toBe(1);
+        });
+
+        it('should subscribe once and not restart the subscriber lifecycle on re-render', () => {
+            let starts = 0;
+            let stops = 0;
+
+            class LifecycleNotifier extends TestNotifier {
+                protected onFirstSubscriber (): void {
+                    starts++;
+                }
+
+                protected onLastSubscriber (): void {
+                    stops++;
+                }
+            }
+
+            const notifier = new LifecycleNotifier({ count: 0, name: 'test' });
+            const useTestState = notifier.createStateHook();
+            const { rerender, unmount } = renderHook(() => useTestState((s) => s.count));
+
+            rerender();
+            rerender();
+
+            expect(starts).toBe(1);
+            expect(stops).toBe(0);
+
+            unmount();
+
+            expect(stops).toBe(1);
+        });
+
+        it('should keep one subscription through re-renders of a factory hook', () => {
+            let starts = 0;
+
+            class LifecycleNotifier extends TestNotifier {
+                protected onFirstSubscriber (): void {
+                    starts++;
+                }
+            }
+
+            const useLifecycle = LifecycleNotifier.createFactoryHook({ count: 0, name: 'test' });
+            const { rerender } = renderHook(() => useLifecycle((s) => s.count));
+
+            rerender();
+            rerender();
+
+            expect(starts).toBe(1);
+        });
+
+        it('should keep the same reference when an inline selector returns an equal value on re-render', () => {
+            const notifier = new TestNotifier({ count: 0, name: 'test' });
+            const useTestState = notifier.createStateHook();
+            const { result, rerender } = renderHook(() => useTestState((s) => ({ name: s.name })));
+            const first = result.current;
+
+            rerender();
+
+            expect(result.current).toBe(first);
+        });
+
+        it('should keep the same reference while the selected value is deeply equal', () => {
+            const notifier = new TestNotifier({ count: 0, name: 'test' });
+            const useTestState = notifier.createStateHook();
+
+            const { result } = renderHook(() => useTestState((s) => ({ name: s.name })));
+            const first = result.current;
+
+            act(() => {
+                notifier.increment();
+            });
+
+            expect(result.current).toBe(first);
         });
     });
 

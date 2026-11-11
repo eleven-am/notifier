@@ -1,11 +1,20 @@
 export type Subscriber<T> = (message: T) => void;
 export type Unsubscribe = () => void;
+export type ErrorHandler = (error: unknown) => void;
+
+const logError: ErrorHandler = (error) => console.error(error);
 
 export class Subject<T> {
     readonly #observers: Set<Subscriber<T>>;
 
-    constructor () {
+    readonly #onError: ErrorHandler;
+
+    /**
+     * @param onError - Receives any error an observer throws; defaults to console.error
+     */
+    constructor (onError: ErrorHandler = logError) {
         this.#observers = new Set<Subscriber<T>>();
+        this.#onError = onError;
     }
 
     /**
@@ -28,10 +37,16 @@ export class Subject<T> {
     }
 
     /**
-     * @desc Publishes a message to all subscribers
+     * @desc Publishes a message to all subscribers; an observer that throws is reported to onError and the rest still run
      * @param message - The message to publish
      */
     publish (message: T) {
-        this.#observers.forEach((observer) => observer(message));
+        this.#observers.forEach((observer) => {
+            try {
+                observer(message);
+            } catch (error) {
+                this.#onError(error);
+            }
+        });
     }
 }

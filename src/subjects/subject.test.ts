@@ -92,4 +92,33 @@ describe('Subject', () => {
         unsubscribeSecond();
         expect(testSubject.size).toBe(0);
     });
+
+    it('should keep notifying the others and hand the error to onError when an observer throws', () => {
+        const onError = jest.fn();
+        const failure = new Error('observer failed');
+        const subject = new Subject<number>(onError);
+
+        subject.subscribe(() => {
+            throw failure;
+        });
+        subject.subscribe(observer2);
+
+        expect(() => subject.publish(1)).not.toThrow();
+        expect(observer2).toHaveBeenCalledWith(1);
+        expect(onError).toHaveBeenCalledWith(failure);
+    });
+
+    it('should log an observer error to the console by default', () => {
+        const consoleError = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+        const failure = new Error('observer failed');
+
+        testSubject.subscribe(() => {
+            throw failure;
+        });
+
+        expect(() => testSubject.publish(1)).not.toThrow();
+        expect(consoleError).toHaveBeenCalledWith(failure);
+
+        consoleError.mockRestore();
+    });
 });

@@ -134,6 +134,27 @@ describe('deepCompare', () => {
 
             expect(deepCompare(set1, set2)).toBe(false);
         });
+
+        it('should compare set items deeply', () => {
+            const set1 = new Set([{ id: 1 }, { id: 2 }]);
+            const set2 = new Set([{ id: 2 }, { id: 1 }]);
+
+            expect(deepCompare(set1, set2)).toBe(true);
+        });
+
+        it('should match each set item at most once', () => {
+            const set1 = new Set([{ id: 1 }, { id: 1 }]);
+            const set2 = new Set([{ id: 1 }, { id: 2 }]);
+
+            expect(deepCompare(set1, set2)).toBe(false);
+        });
+
+        it('should return false when a set item has no deep match', () => {
+            const set1 = new Set([1, { id: 1 }]);
+            const set2 = new Set([1, { id: 3 }]);
+
+            expect(deepCompare(set1, set2)).toBe(false);
+        });
     });
 
     describe('objects', () => {
@@ -233,6 +254,64 @@ describe('deepCompare', () => {
             second.set('self', second);
 
             expect(deepCompare(first, second)).toBe(true);
+        });
+
+        it('should handle a set that contains an object pointing back to it', () => {
+            const first = new Set<unknown>();
+            const second = new Set<unknown>();
+
+            first.add({ owner: first });
+            second.add({ owner: second });
+
+            expect(deepCompare(first, second)).toBe(true);
+        });
+
+        it('should compare a shared deep object against separate equal copies', () => {
+            const nest = (depth: number, leaf: unknown): unknown => (depth === 0 ? leaf : { child: nest(depth - 1, leaf) });
+            const shared = { value: 1 };
+
+            const first = nest(80, { left: shared, right: shared });
+            const second = nest(80, { left: { value: 1 }, right: { value: 1 } });
+            const different = nest(80, { left: { value: 1 }, right: { value: 2 } });
+
+            expect(deepCompare(first, second)).toBe(true);
+            expect(deepCompare(first, different)).toBe(false);
+        });
+
+        it('should compare a branching tree with parent back-pointers quickly', () => {
+            interface TreeNode { id: number; parent: TreeNode | null; children: TreeNode[] }
+
+            const build = (): TreeNode => {
+                let id = 0;
+                const grow = (parent: TreeNode | null, depth: number): TreeNode => {
+                    const node: TreeNode = { id: id++, parent, children: [] };
+
+                    if (depth > 0) {
+                        for (let i = 0; i < 2; i++) {
+                            node.children.push(grow(node, depth - 1));
+                        }
+                    }
+
+                    return node;
+                };
+
+                return grow(null, 2);
+            };
+
+            const started = Date.now();
+
+            expect(deepCompare(build(), build())).toBe(true);
+            expect(Date.now() - started).toBeLessThan(50);
+        });
+
+        it('should tell apart circular structures that differ', () => {
+            const first: Record<string, unknown> = { value: 1 };
+            const second: Record<string, unknown> = { value: 2 };
+
+            first.self = first;
+            second.self = second;
+
+            expect(deepCompare(first, second)).toBe(false);
         });
     });
 

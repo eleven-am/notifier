@@ -1,6 +1,18 @@
 type SeenPairs = WeakMap<object, WeakSet<object>>;
 
-function hasSeenPair (firstObject: object, secondObject: object, seen: SeenPairs): boolean {
+interface Visit {
+    seen: SeenPairs | null;
+    objects: number;
+}
+
+const REMEMBER_PAIRS_AFTER = 64;
+
+function hasSeenPair (firstObject: object, secondObject: object, visit: Visit): boolean {
+    if (visit.seen === null) {
+        visit.seen = new WeakMap();
+    }
+
+    const { seen } = visit;
     const matches = seen.get(firstObject);
 
     if (matches?.has(secondObject)) {
@@ -16,13 +28,43 @@ function hasSeenPair (firstObject: object, secondObject: object, seen: SeenPairs
     return false;
 }
 
-export function deepCompare (firstObject: any, secondObject: any, seen: SeenPairs = new WeakMap()): boolean {
+function remembered (firstObject: object, secondObject: object, visit: Visit): boolean {
+    visit.objects += 1;
+
+    return visit.objects > REMEMBER_PAIRS_AFTER && hasSeenPair(firstObject, secondObject, visit);
+}
+
+function setsMatch (firstSet: Set<unknown>, secondSet: Set<unknown>, visit: Visit): boolean {
+    let unmatched: unknown[] | null = null;
+
+    for (const value of firstSet) {
+        if (secondSet.has(value)) {
+            continue;
+        }
+
+        if (unmatched === null) {
+            unmatched = Array.from(secondSet).filter((candidate) => !firstSet.has(candidate));
+        }
+
+        const index = unmatched.findIndex((candidate) => compare(value, candidate, visit)); // eslint-disable-line @typescript-eslint/no-use-before-define
+
+        if (index === -1) {
+            return false;
+        }
+
+        unmatched.splice(index, 1);
+    }
+
+    return true;
+}
+
+function compare (firstObject: any, secondObject: any, visit: Visit): boolean {
     if (firstObject === secondObject) {
         return true;
     }
 
-    if (typeof firstObject === 'function' && typeof secondObject === 'function') {
-        return firstObject === secondObject;
+    if (typeof firstObject !== 'object' || typeof secondObject !== 'object' || firstObject === null || secondObject === null) {
+        return false;
     }
 
     if (firstObject instanceof Date && secondObject instanceof Date) {
@@ -38,11 +80,11 @@ export function deepCompare (firstObject: any, secondObject: any, seen: SeenPair
             return false;
         }
 
-        if (hasSeenPair(firstObject, secondObject, seen)) {
+        if (remembered(firstObject, secondObject, visit)) {
             return true;
         }
 
-        return firstObject.every((item, index) => deepCompare(item, secondObject[index], seen));
+        return firstObject.every((item, index) => compare(item, secondObject[index], visit));
     }
 
     if (firstObject instanceof Map && secondObject instanceof Map) {
@@ -50,12 +92,12 @@ export function deepCompare (firstObject: any, secondObject: any, seen: SeenPair
             return false;
         }
 
-        if (hasSeenPair(firstObject, secondObject, seen)) {
+        if (remembered(firstObject, secondObject, visit)) {
             return true;
         }
 
         for (const [key, value] of firstObject) {
-            if (!secondObject.has(key) || !deepCompare(value, secondObject.get(key), seen)) {
+            if (!secondObject.has(key) || !compare(value, secondObject.get(key), visit)) {
                 return false;
             }
         }
@@ -68,32 +110,38 @@ export function deepCompare (firstObject: any, secondObject: any, seen: SeenPair
             return false;
         }
 
-        for (const value of firstObject) {
-            if (!secondObject.has(value)) {
-                return false;
-            }
-        }
-
-        return true;
-    }
-
-    if (firstObject && secondObject && typeof firstObject === 'object' && typeof secondObject === 'object') {
-        if (firstObject.constructor !== secondObject.constructor) {
-            return false;
-        }
-
-        if (hasSeenPair(firstObject, secondObject, seen)) {
+        if (remembered(firstObject, secondObject, visit)) {
             return true;
         }
 
-        const properties = Object.keys(firstObject);
-
-        if (properties.length !== Object.keys(secondObject).length) {
-            return false;
-        }
-
-        return properties.every((prop) => deepCompare(firstObject[prop], secondObject[prop], seen));
+        return setsMatch(firstObject, secondObject, visit);
     }
 
-    return false;
+    if (firstObject.constructor !== secondObject.constructor) {
+        return false;
+    }
+
+    if (remembered(firstObject, secondObject, visit)) {
+        return true;
+    }
+
+    const properties = Object.keys(firstObject);
+
+    if (properties.length !== Object.keys(secondObject).length) {
+        return false;
+    }
+
+    return properties.every((prop) => compare(firstObject[prop], secondObject[prop], visit));
+}
+
+/**
+ * Structural equality used to skip updates whose value did not change: compares primitives,
+ * arrays, plain objects, Maps (keys by identity), Sets (items deeply), Dates and RegExps,
+ * and handles circular references.
+ */
+export function deepCompare (firstObject: unknown, secondObject: unknown): boolean {
+    return compare(firstObject, secondObject, {
+        seen: null,
+        objects: 0,
+    });
 }
