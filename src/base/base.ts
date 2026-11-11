@@ -164,13 +164,9 @@ export class BaseNotifier<Data extends object> {
         };
     }
 
-    protected onFirstSubscriber (): void {
-        // Optional lifecycle hook for subclasses that own external resources.
-    }
+    protected onFirstSubscriber (): void {}
 
-    protected onLastSubscriber (): void {
-        // Optional lifecycle hook for subclasses that own external resources.
-    }
+    protected onLastSubscriber (): void {}
 
     protected updateState (state: Partial<Data>): void {
         this.state = {
