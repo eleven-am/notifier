@@ -8,6 +8,7 @@ describe('deepCompare', () => {
             expect(deepCompare(true, true)).toBe(true);
             expect(deepCompare(null, null)).toBe(true);
             expect(deepCompare(undefined, undefined)).toBe(true);
+            expect(deepCompare(NaN, NaN)).toBe(true);
         });
 
         it('should return false for unequal primitives', () => {
@@ -168,6 +169,14 @@ describe('deepCompare', () => {
 
         it('should return false for objects with different values', () => {
             expect(deepCompare({ a: 1 }, { a: 2 })).toBe(false);
+        });
+
+        it('should compare enumerable symbol properties', () => {
+            const key = Symbol('key');
+
+            expect(deepCompare({ [key]: 1 }, { [key]: 1 })).toBe(true);
+            expect(deepCompare({ [key]: 1 }, { [key]: 2 })).toBe(false);
+            expect(deepCompare({ [key]: 1 }, {})).toBe(false);
         });
 
         it('should return false for objects with different number of keys', () => {

@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Node ${{ matrix.node }} / React ${{ matrix.react }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - node: 20
+            react: 18.3.1
+          - node: 24
+            react: 19.3.1
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Select supported React version
+        run: npm install --no-save --package-lock=false react@${{ matrix.react }} react-dom@${{ matrix.react }}
+      - name: Audit production dependencies
+        run: npm audit --omit=dev
+      - name: Build and verify package
+        run: npm run release
+      - name: Verify publish contents
+        run: npm pack ./dist --dry-run

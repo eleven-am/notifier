@@ -15,7 +15,7 @@ type UseNotifierHook<State> = <ReturnType = State>(selector?: SelectorFunc<State
 type Source<State> = BaseNotifier<State & object> | Selector<any, State>;
 type GetFunction = <NotifierState>(notifier: Source<NotifierState>) => Readonly<NotifierState>;
 type SetFunction = <NotifierState extends object>(notifier: BaseNotifier<NotifierState>, state: NotifierState) => void;
-type SelectorHandler<ReturnedState> = (get: GetFunction, set: SetFunction, signal: AbortSignal) => Promise<ReturnedState> | ReturnedState;
+type SelectorHandler<ReturnedState> = (get: GetFunction, set: SetFunction, signal: AbortSignal) => PromiseLike<ReturnedState> | ReturnedState;
 
 export interface Selector<Value, State = Value> {
     subscribe (subscriber: Subscriber<Value>): Unsubscribe;
@@ -28,9 +28,24 @@ export interface Selector<Value, State = Value> {
     destroy (): void;
 }
 
-type SelectorOf<Result> = [Result] extends [Promise<infer Value>] ? Selector<Value, Value | undefined> : Selector<Result>;
+type SelectorOf<Result> = [Result] extends [PromiseLike<infer Value>] ? Selector<Value, Value | undefined> : Selector<Result>;
 
 const identity = <State>(state: State): State => state;
+
+function isPromiseLike<T> (value: PromiseLike<T> | T): value is PromiseLike<T> {
+    if (!(
+        (typeof value === 'object' && value !== null) ||
+        typeof value === 'function'
+    )) {
+        return false;
+    }
+
+    try {
+        return typeof (value as PromiseLike<T>).then === 'function';
+    } catch {
+        return true;
+    }
+}
 
 function getNotifierState<T> (notifier: Source<T>): T {
     if (notifier instanceof BaseNotifier) {
@@ -60,7 +75,7 @@ function setNotifierState<T extends object> (notifier: BaseNotifier<T>, state: T
  * selector is destroyed, and its value is undefined until the first run resolves.
  */
 export function selector<Result> (selectorFn: (get: GetFunction, set: SetFunction, signal: AbortSignal) => Result): SelectorOf<Result>;
-export function selector<ReturnedState> (selectorFn: (get: GetFunction, set: SetFunction, signal: AbortSignal) => Promise<ReturnedState>): Selector<ReturnedState, ReturnedState | undefined>;
+export function selector<ReturnedState> (selectorFn: (get: GetFunction, set: SetFunction, signal: AbortSignal) => PromiseLike<ReturnedState>): Selector<ReturnedState, ReturnedState | undefined>;
 export function selector<ReturnedState> (selectorFn: SelectorHandler<ReturnedState>): Selector<ReturnedState, ReturnedState | undefined> {
     type State = ReturnedState | undefined;
 
@@ -72,8 +87,7 @@ export function selector<ReturnedState> (selectorFn: SelectorHandler<ReturnedSta
     let needsInit = true;
     let serverReady = false;
     let run: AbortController | null = null;
-    let inFlight: AbortController | null = null;
-    let serverRun: object | null = null;
+    let serverRun: AbortController | null = null;
     let returnedState: State;
     let serverState: State;
     let status: SelectorStatus = Object.freeze({
@@ -137,13 +151,13 @@ export function selector<ReturnedState> (selectorFn: SelectorHandler<ReturnedSta
         });
     }
 
-    function abortInFlight (): void {
-        inFlight?.abort();
-        inFlight = null;
+    function abortCurrentRun (): void {
+        run?.abort();
+        run = null;
     }
 
     function compute (): void {
-        abortInFlight();
+        abortCurrentRun();
 
         const current = new AbortController();
         const reads = new Set<Source<any>>();
@@ -158,7 +172,7 @@ export function selector<ReturnedState> (selectorFn: SelectorHandler<ReturnedSta
 
         run = current;
 
-        let result: Promise<ReturnedState> | ReturnedState;
+        let result: PromiseLike<ReturnedState> | ReturnedState;
 
         try {
             result = selectorFn(get, set, current.signal);
@@ -174,28 +188,25 @@ export function selector<ReturnedState> (selectorFn: SelectorHandler<ReturnedSta
             return;
         }
 
-        if (!(result instanceof Promise)) {
+        if (!isPromiseLike(result)) {
             settle(result, reads);
 
             return;
         }
 
-        inFlight = current;
         setStatus({
             pending: true,
             error: null,
         });
 
-        result.then(
+        Promise.resolve(result).then(
             (state) => {
                 if (run === current) {
-                    inFlight = null;
                     settle(state, reads);
                 }
             },
             (error: unknown) => {
                 if (run === current) {
-                    inFlight = null;
                     fail(error);
                 }
             },
@@ -203,32 +214,44 @@ export function selector<ReturnedState> (selectorFn: SelectorHandler<ReturnedSta
     }
 
     function computeServer (): void {
-        const current = {};
+        serverRun?.abort();
+
+        const current = new AbortController();
         const get: GetFunction = (source) => getNotifierServerState(source);
 
         serverRun = current;
 
-        let result: Promise<ReturnedState> | ReturnedState;
+        let result: PromiseLike<ReturnedState> | ReturnedState;
 
         try {
-            result = selectorFn(get, set, new AbortController().signal);
+            result = selectorFn(get, set, current.signal);
         } catch {
+            if (serverRun === current) {
+                serverRun = null;
+            }
+
             return;
         }
 
-        if (!(result instanceof Promise)) {
+        if (!isPromiseLike(result)) {
             serverState = result;
+            serverRun = null;
 
             return;
         }
 
-        result.then(
+        Promise.resolve(result).then(
             (state) => {
                 if (serverRun === current) {
+                    serverRun = null;
                     serverState = state;
                 }
             },
-            () => undefined,
+            () => {
+                if (serverRun === current) {
+                    serverRun = null;
+                }
+            },
         );
     }
 
@@ -242,8 +265,8 @@ export function selector<ReturnedState> (selectorFn: SelectorHandler<ReturnedSta
     }
 
     function destroy (): void {
-        abortInFlight();
-        run = null;
+        abortCurrentRun();
+        serverRun?.abort();
         serverRun = null;
         sources.forEach((unsubscribe) => unsubscribe());
         sources.clear();

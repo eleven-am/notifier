@@ -62,7 +62,7 @@ class CounterNotifier extends Notifier<CounterState> {
 const counter = new CounterNotifier({ count: 0 });
 
 export const useCounter = counter.createStateHook();
-export const useCounterActions = counter.createActionsHook();
+export const useCounterActions = counter.createActionsHook('increment');
 
 function Counter() {
   const count = useCounter((state) => state.count);
@@ -144,11 +144,11 @@ same object until something in it changes, which also keeps it safe to use in
 
 ## Calling methods from components
 
-`createActionsHook()` returns a hook that gives you the notifier's public methods,
-already bound, so you can pass them around directly:
+`createActionsHook(...names)` returns a hook that gives you exactly the named
+methods, already bound, so you can pass them around directly:
 
 ```tsx
-const useUserActions = userNotifier.createActionsHook();
+const useUserActions = userNotifier.createActionsHook('setName');
 
 function NameInput() {
   const { setName } = useUserActions();
@@ -157,9 +157,14 @@ function NameInput() {
 ```
 
 - The object is the same on every render, so it is safe in dependency arrays.
-- It contains your public methods only. Methods whose name starts with `_`,
-  getters and setters, and the built-in methods (`subscribe`, `reset`,
-  `createStateHook`, `updateState`, the lifecycle hooks, `onError`) are left out.
+- The named form is the safest public boundary: it is type checked, fails during
+  setup if a requested value is not callable, and never exposes an unlisted
+  helper.
+- The no-argument form remains available for convenience. It discovers prototype
+  methods and function-valued instance fields, while leaving out `_`-prefixed
+  names, accessors and built-in methods. JavaScript erases TypeScript's
+  `private`/`protected` modifiers at runtime, so use the named form, JavaScript
+  `#private` methods or an `_` prefix when the boundary must be enforced.
 - The actions hook never causes a re-render.
 
 ## Using a notifier outside React
@@ -253,8 +258,9 @@ How a selector behaves:
   behind an `if`), changes to that source no longer trigger it.
 - **It only notifies when the result changes.** Results are compared by content,
   the same way as the state hook.
-- **It stops when nobody uses it.** When the last subscriber leaves, it releases
-  its sources, and it starts again the next time it is read.
+- **Subscribed selectors stop when nobody uses them.** When the last hook or
+  explicit subscription leaves, the selector releases its sources and starts
+  again the next time it is read.
 - **Selectors can read other selectors**: `get(cartTotal)` works inside another
   selector.
 - **It can write to a notifier** with its second argument, `set(notifier, state)`,
@@ -263,6 +269,9 @@ How a selector behaves:
 
 The selector object also works outside React: `subscribe(listener)`,
 `getSnapshot()`, `getStatus()`, `subscribeStatus(listener)` and `destroy()`.
+Calling `getSnapshot()` or `getStatus()` directly starts live dependency tracking;
+if no hook or subscription owns that selector, the caller must call `destroy()`
+when the live read is no longer needed.
 
 ## Async selectors
 
@@ -398,6 +407,11 @@ reported through the selector's status instead (see
 
 ## Server rendering
 
+Create a fresh notifier and selector graph for every server request. Never put a
+notifier containing request or user data in a server module singleton: both
+`serverState` and selector server snapshots are intentionally cached, so sharing
+that graph can leak one request's data into another request.
+
 When the server renders with data the client must start from, set it once in the
 notifier with the protected `serverState` setter:
 
@@ -409,9 +423,21 @@ class UserNotifier extends Notifier<UserState> {
 }
 ```
 
+Build and hydrate that notifier inside the request boundary:
+
+```ts
+function createRequestState(user: UserState) {
+  const userNotifier = new UserNotifier({ name: '', age: 0 });
+  userNotifier.hydrate(user);
+
+  return { userNotifier };
+}
+```
+
 The first value set becomes both the server snapshot used during hydration and
 the current state; later calls are ignored. Without it, the server snapshot is the
-initial state.
+initial state. A module-level singleton is fine in the browser, but not for
+request-specific state on a concurrent server.
 
 ## API reference
 
@@ -423,7 +449,7 @@ initial state.
 | `MyNotifier.build(...args)` | you | same as `new`, typed for subclasses |
 | `MyNotifier.createFactoryHook(...args)` | components | hook returning `{ state, actions }` for a per-component instance |
 | `createStateHook()` | components | hook: `useX()` or `useX(state => picked)` |
-| `createActionsHook()` | components | hook returning the bound public methods |
+| `createActionsHook(...names)` | components | hook returning an exact, frozen set of bound methods (no names keeps compatibility discovery) |
 | `subscribe(listener)` | outside React | listen to changes; returns unsubscribe |
 | `reset()` | anyone | back to the initial state |
 | `this.state` / `this.state = next` | the class | read / replace state |
@@ -444,7 +470,7 @@ Everything in `Notifier`, plus:
 
 ### `selector(fn)`
 
-`fn(get, set, signal)` returns a value or a promise.
+`fn(get, set, signal)` returns a value or a Promise-like value.
 
 | Member | What it does |
 | --- | --- |
@@ -467,7 +493,8 @@ Everything in `Notifier`, plus:
 
 1. Change state only inside the notifier, with `updateState` or `this.state = …`.
 2. Never mutate state in place; always create new objects and arrays.
-3. Create notifiers and hooks once, at module level, not inside components.
+3. In the browser, create shared notifiers and hooks once at module level, not
+   inside components. On the server, create request-specific graphs per request.
 4. Shared state: a notifier instance. Per-component state: `createFactoryHook`.
 5. Derived or loaded data: a selector. Pass its `signal` to `fetch`.
 6. Things that happen: events. Things that are: state.

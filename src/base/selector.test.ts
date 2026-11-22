@@ -357,6 +357,8 @@ describe('selector', () => {
 
             expect(signals).toHaveLength(2);
             expect(signals[0]).not.toBe(signals[1]);
+            expect(signals[0].aborted).toBe(true);
+            expect(signals[1].aborted).toBe(false);
 
             derived.destroy();
         });
@@ -371,6 +373,23 @@ describe('selector', () => {
             });
 
             derived.subscribe(() => undefined);
+            derived.destroy();
+
+            expect(seen?.aborted).toBe(true);
+        });
+
+        it('should abort an in-flight server run on destroy', () => {
+            let seen: AbortSignal | undefined;
+            const pending = new Promise<number>(() => undefined);
+            const derived = selector((_get, _set, signal) => {
+                seen = signal;
+
+                return pending;
+            });
+
+            derived.getServerSnapshot();
+            expect(seen?.aborted).toBe(false);
+
             derived.destroy();
 
             expect(seen?.aborted).toBe(true);
@@ -589,6 +608,44 @@ describe('selector', () => {
             });
 
             expect(derived.getStatus()).toEqual({ pending: false, error: null });
+
+            derived.destroy();
+        });
+
+        it('should assimilate PromiseLike values without treating them as snapshots', async () => {
+            const thenable = {
+                then: (resolve: (value: number) => unknown): void => {
+                    queueMicrotask(() => resolve(42));
+                },
+            } as unknown as PromiseLike<number>;
+            const derived = selector(() => thenable);
+
+            expect(derived.getSnapshot()).toBeUndefined();
+            expect(derived.getStatus()).toEqual({ pending: true, error: null });
+
+            await waitFor(() => {
+                expect(derived.getSnapshot()).toBe(42);
+            });
+
+            expect(derived.getStatus()).toEqual({ pending: false, error: null });
+
+            derived.destroy();
+        });
+
+        it('should expose a throwing then getter as an async selector error', async () => {
+            const failure = new Error('then getter failed');
+            const malformed = Object.defineProperty({}, 'then', {
+                get: () => {
+                    throw failure;
+                },
+            }) as PromiseLike<number>;
+            const derived = selector(() => malformed);
+
+            expect(() => derived.getSnapshot()).not.toThrow();
+
+            await waitFor(() => {
+                expect(derived.getStatus()).toEqual({ pending: false, error: failure });
+            });
 
             derived.destroy();
         });

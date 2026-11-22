@@ -3,13 +3,15 @@ import { useRef } from 'react';
 import { useSelected } from './useSelected';
 import { Subject, Unsubscribe, Subscriber } from '../subjects/subject';
 
-type ClassMethods<T> = {
-    [K in keyof T]: T[K] extends (...args: any[]) => any ? T[K] : never;
-};
+type MethodKeys<T> = {
+    [K in keyof T]-?: T[K] extends (...args: any[]) => any ? K : never;
+}[keyof T];
 
-type PublicMethods<T> = Omit<ClassMethods<T>, keyof BaseNotifier<any>>;
+type PublicMethodKeys<T> = Exclude<MethodKeys<T>, keyof BaseNotifier<any>>;
 
-type UseActorsHook<Class extends BaseNotifier<any>> = () => PublicMethods<Class>;
+type PublicMethods<T> = Pick<T, PublicMethodKeys<T>>;
+
+type UseActionsHook<Actions> = () => Actions;
 
 type SelectorFunc<State, ReturnType> = (state: State) => ReturnType;
 
@@ -32,7 +34,7 @@ export class BaseNotifier<Data extends object> {
 
     readonly #initialState: Data;
 
-    readonly #actors: PublicMethods<this>;
+    #actors: PublicMethods<this> | null;
 
     #serverState: Data | null;
 
@@ -55,7 +57,7 @@ export class BaseNotifier<Data extends object> {
         this.#state = initialState;
         this.#serverState = null;
         this.#subject = new Subject<Data>((error) => this.onError(error));
-        this.#actors = this.#getPublicMethods();
+        this.#actors = null;
     }
 
     protected get serverState (): Readonly<Data> {
@@ -118,8 +120,21 @@ export class BaseNotifier<Data extends object> {
         this.state = this.#initialState;
     }
 
-    createActionsHook (): UseActorsHook<this> {
-        return () => this.#actors;
+    createActionsHook (): UseActionsHook<PublicMethods<this>>;
+
+    createActionsHook <Key extends PublicMethodKeys<this>> (...methodNames: Key[]): UseActionsHook<Pick<PublicMethods<this>, Key>>;
+
+    createActionsHook (...methodNames: PropertyKey[]): () => object {
+        let actions: object;
+
+        if (methodNames.length === 0) {
+            this.#actors ??= this.#getPublicMethods();
+            actions = this.#actors;
+        } else {
+            actions = this.#bindMethods(methodNames);
+        }
+
+        return () => actions;
     }
 
     subscribe (subscriber: Subscriber<Data>): Unsubscribe {
@@ -167,63 +182,77 @@ export class BaseNotifier<Data extends object> {
     }
 
     #getPublicMethods (): PublicMethods<this> {
-        const objectPrototype = Object.getPrototypeOf({});
-        const objectKeys = Reflect.ownKeys(objectPrototype);
-        const methods = new Set<string>();
+        const methods = new Set<PropertyKey>();
+        const baseClassMethods = new Set<PropertyKey>(Reflect.ownKeys(BaseNotifier.prototype));
+        const collectMethods = (target: object): void => {
+            Reflect.ownKeys(target).forEach((name) => {
+                const descriptor = Object.getOwnPropertyDescriptor(target, name);
 
-        const isAccessor = (prop: string, obj: object): boolean => {
-            const descriptor = Object.getOwnPropertyDescriptor(obj, prop);
-
-            return Boolean(descriptor && (descriptor.get || descriptor.set));
-        };
-
-        const collectMethods = (obj: object | null): void => {
-            if (!obj) {
-                return;
-            }
-
-            const proto = Reflect.getPrototypeOf(obj);
-
-            if (!proto) {
-                return;
-            }
-
-            Reflect.ownKeys(proto)
-                .map((k) => k.toString())
-                .filter((name) => !objectKeys.includes(name))
-                .filter((name) => !isAccessor(name, proto))
-                .forEach((k) => methods.add(k));
-
-            collectMethods(proto);
+                if (descriptor && typeof descriptor.value === 'function') {
+                    methods.add(name);
+                }
+            });
         };
 
         collectMethods(this);
 
-        const baseClassMethods = [
-            'reset',
-            'subscribe',
-            'createStateHook',
-            'createActionsHook',
-            'updateState',
-            'onFirstSubscriber',
-            'onLastSubscriber',
-            'onError',
-        ];
+        let prototype = Reflect.getPrototypeOf(this);
+
+        while (prototype && prototype !== BaseNotifier.prototype && prototype !== Object.prototype) {
+            collectMethods(prototype);
+            prototype = Reflect.getPrototypeOf(prototype);
+        }
 
         const methodNames = Array.from(methods)
-            .filter((k) => !k.startsWith('#') && !k.startsWith('_') && k !== 'constructor')
-            .filter((k) => !baseClassMethods.includes(k));
+            .filter((name) => name !== 'constructor')
+            .filter((name) => typeof name !== 'string' || (!name.startsWith('#') && !name.startsWith('_')))
+            .filter((name) => !baseClassMethods.has(name));
 
-        const self = this as Record<string, unknown>;
+        return this.#bindMethods(methodNames) as PublicMethods<this>;
+    }
 
-        return methodNames
-            .filter((name) => typeof self[name] === 'function')
-            .reduce((acc, name) => {
-                const method = self[name] as (...args: unknown[]) => unknown;
+    #bindMethods (methodNames: PropertyKey[]): object {
+        const actions: Record<PropertyKey, unknown> = {};
+        const baseClassMethods = new Set<PropertyKey>(Reflect.ownKeys(BaseNotifier.prototype));
 
-                (acc as Record<string, unknown>)[name] = method.bind(this);
+        Array.from(new Set(methodNames)).forEach((name) => {
+            const hidden = typeof name === 'string' && (name.startsWith('#') || name.startsWith('_'));
+            const method = this.#findMethod(name);
 
-                return acc;
-            }, {} as PublicMethods<this>);
+            if (hidden || baseClassMethods.has(name) || method === null) {
+                throw new Error(`Notifier action "${String(name)}" must be a callable public method`);
+            }
+
+            Object.defineProperty(actions, name, {
+                configurable: false,
+                enumerable: true,
+                value: method.bind(this),
+                writable: false,
+            });
+        });
+
+        return Object.freeze(actions);
+    }
+
+    #findMethod (name: PropertyKey): ((...args: unknown[]) => unknown) | null {
+        const ownDescriptor = Object.getOwnPropertyDescriptor(this, name);
+
+        if (ownDescriptor) {
+            return typeof ownDescriptor.value === 'function' ? ownDescriptor.value : null;
+        }
+
+        let prototype = Reflect.getPrototypeOf(this);
+
+        while (prototype) {
+            const descriptor = Object.getOwnPropertyDescriptor(prototype, name);
+
+            if (descriptor) {
+                return typeof descriptor.value === 'function' ? descriptor.value : null;
+            }
+
+            prototype = Reflect.getPrototypeOf(prototype);
+        }
+
+        return null;
     }
 }

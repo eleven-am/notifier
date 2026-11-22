@@ -108,6 +108,42 @@ describe('Subject', () => {
         expect(onError).toHaveBeenCalledWith(failure);
     });
 
+    it('should not deliver the current message to subscribers added during publish', () => {
+        const lateObserver = jest.fn();
+
+        testSubject.subscribe(() => {
+            testSubject.subscribe(lateObserver);
+        });
+
+        testSubject.publish(1);
+
+        expect(lateObserver).not.toHaveBeenCalled();
+
+        testSubject.publish(2);
+
+        expect(lateObserver).toHaveBeenCalledTimes(1);
+        expect(lateObserver).toHaveBeenCalledWith(2);
+    });
+
+    it('should keep notifying subscribers when the error handler itself throws', () => {
+        const handlerFailure = new Error('error handler failed');
+        const consoleError = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+        const subject = new Subject<number>(() => {
+            throw handlerFailure;
+        });
+
+        subject.subscribe(() => {
+            throw new Error('observer failed');
+        });
+        subject.subscribe(observer2);
+
+        expect(() => subject.publish(1)).not.toThrow();
+        expect(observer2).toHaveBeenCalledWith(1);
+        expect(consoleError).toHaveBeenCalledWith(handlerFailure);
+
+        consoleError.mockRestore();
+    });
+
     it('should log an observer error to the console by default', () => {
         const consoleError = jest.spyOn(console, 'error').mockImplementation(() => undefined);
         const failure = new Error('observer failed');
@@ -118,6 +154,22 @@ describe('Subject', () => {
 
         expect(() => testSubject.publish(1)).not.toThrow();
         expect(consoleError).toHaveBeenCalledWith(failure);
+
+        consoleError.mockRestore();
+    });
+
+    it('should keep notifying subscribers when console error reporting throws', () => {
+        const consoleError = jest.spyOn(console, 'error').mockImplementation(() => {
+            throw new Error('console failed');
+        });
+
+        testSubject.subscribe(() => {
+            throw new Error('observer failed');
+        });
+        testSubject.subscribe(observer2);
+
+        expect(() => testSubject.publish(1)).not.toThrow();
+        expect(observer2).toHaveBeenCalledWith(1);
 
         consoleError.mockRestore();
     });

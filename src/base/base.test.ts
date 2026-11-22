@@ -527,6 +527,60 @@ describe('BaseNotifier', () => {
 
             expect(stateResult.current).toBe(1);
         });
+
+        it('should include function-valued instance fields after subclass initialization', () => {
+            class ArrowNotifier extends BaseNotifier<{ count: number }> {
+                readonly incrementBy = (amount: number): void => {
+                    this.updateState({ count: this.state.count + amount });
+                };
+
+                getCount (): number {
+                    return this.state.count;
+                }
+            }
+
+            const notifier = new ArrowNotifier({ count: 0 });
+            const actions = notifier.createActionsHook()();
+
+            actions.incrementBy(3);
+
+            expect(actions.getCount()).toBe(3);
+        });
+
+        it('should create an exact, frozen action surface from an explicit allowlist', () => {
+            class RestrictedNotifier extends BaseNotifier<{ count: number }> {
+                readonly incrementBy = (amount: number): void => {
+                    this.updateState({ count: this.state.count + amount });
+                };
+
+                increment (): void {
+                    this.incrementBy(1);
+                }
+
+                private secret (): void {}
+
+                protected helper (): void {}
+            }
+
+            const notifier = new RestrictedNotifier({ count: 0 });
+            const actions = notifier.createActionsHook('increment', 'incrementBy')();
+
+            expect(Object.keys(actions)).toEqual(['increment', 'incrementBy']);
+            expect(Object.isFrozen(actions)).toBe(true);
+            expect((actions as Record<string, unknown>).secret).toBeUndefined();
+            expect((actions as Record<string, unknown>).helper).toBeUndefined();
+        });
+
+        it('should fail explicitly when a requested action is not callable', () => {
+            const notifier = new TestNotifier({ count: 0, name: 'test' });
+            const invalidNotifier = notifier as unknown as {
+                createActionsHook: (...methodNames: string[]) => () => object;
+            };
+
+            expect(() => invalidNotifier.createActionsHook('missing')).toThrow(
+                'Notifier action "missing" must be a callable public method',
+            );
+        });
     });
 
     describe('static build', () => {

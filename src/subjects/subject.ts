@@ -2,7 +2,13 @@ export type Subscriber<T> = (message: T) => void;
 export type Unsubscribe = () => void;
 export type ErrorHandler = (error: unknown) => void;
 
-const logError: ErrorHandler = (error) => console.error(error);
+const logError: ErrorHandler = (error) => {
+    try {
+        console.error(error);
+    } catch {
+        // Error reporting must never interrupt delivery to the remaining subscribers.
+    }
+};
 
 export class Subject<T> {
     readonly #observers: Set<Subscriber<T>>;
@@ -41,11 +47,17 @@ export class Subject<T> {
      * @param message - The message to publish
      */
     publish (message: T) {
-        this.#observers.forEach((observer) => {
+        const observers = Array.from(this.#observers);
+
+        observers.forEach((observer) => {
             try {
                 observer(message);
             } catch (error) {
-                this.#onError(error);
+                try {
+                    this.#onError(error);
+                } catch (handlerError) {
+                    logError(handlerError);
+                }
             }
         });
     }

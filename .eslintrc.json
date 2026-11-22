@@ -18,6 +18,7 @@
   "ignorePatterns": ["**/*.test.ts", "dist/**"],
   "plugins": [
     "@typescript-eslint",
+    "@stylistic/ts",
     "file-progress"
   ],
   "settings": {
@@ -36,7 +37,7 @@
   "rules": {
     "file-progress/activate": 1,
     "@typescript-eslint/ban-types": "off",
-    "@typescript-eslint/type-annotation-spacing": [
+    "@stylistic/ts/type-annotation-spacing": [
       "error",
       {
         "before": true,
@@ -58,7 +59,7 @@
         ]
       }
     ],
-    "@typescript-eslint/member-delimiter-style": [
+    "@stylistic/ts/member-delimiter-style": [
       "error",
       {
         "multiline": {
@@ -71,7 +72,7 @@
         }
       }
     ],
-    "@typescript-eslint/indent": [
+    "@stylistic/ts/indent": [
       "error",
       4
     ],

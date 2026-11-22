@@ -59,7 +59,7 @@ function setsMatch (firstSet: Set<unknown>, secondSet: Set<unknown>, visit: Visi
 }
 
 function compare (firstObject: any, secondObject: any, visit: Visit): boolean {
-    if (firstObject === secondObject) {
+    if (Object.is(firstObject, secondObject)) {
         return true;
     }
 
@@ -125,13 +125,19 @@ function compare (firstObject: any, secondObject: any, visit: Visit): boolean {
         return true;
     }
 
-    const properties = Object.keys(firstObject);
+    const properties = Reflect.ownKeys(firstObject)
+        .filter((property) => Object.prototype.propertyIsEnumerable.call(firstObject, property));
+    const secondProperties = Reflect.ownKeys(secondObject)
+        .filter((property) => Object.prototype.propertyIsEnumerable.call(secondObject, property));
 
-    if (properties.length !== Object.keys(secondObject).length) {
+    if (properties.length !== secondProperties.length) {
         return false;
     }
 
-    return properties.every((prop) => compare(firstObject[prop], secondObject[prop], visit));
+    return properties.every((prop) => (
+        Object.prototype.propertyIsEnumerable.call(secondObject, prop) &&
+        compare(firstObject[prop], secondObject[prop], visit)
+    ));
 }
 
 /**
